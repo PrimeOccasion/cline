@@ -7,26 +7,21 @@ import { McpHub } from "../../services/mcp/McpHub"
 import { BrowserSettings } from "../../shared/BrowserSettings"
 
 export async function SYSTEM_PROMPT(
-  cwd: string,
-  supportsComputerUse: boolean,
-  mcpHub: McpHub,
-  browserSettings: BrowserSettings
+	cwd: string,
+	supportsComputerUse: boolean,
+	mcpHub: McpHub,
+	browserSettings: BrowserSettings,
 ): Promise<string> {
-  // Get connected servers for more compact representation
-  const connectedServers = mcpHub.getServers().filter(
-    (server) => server.status === "connected"
-  )
+	// Get connected servers for more compact representation
+	const connectedServers = mcpHub.getServers().filter((server) => server.status === "connected")
 
-  // Build MCP section only if needed
-  const mcpSection =
-    mcpHub.getMode() !== "off" ? buildMcpSection(connectedServers, mcpHub) : ""
+	// Build MCP section only if needed
+	const mcpSection = mcpHub.getMode() !== "off" ? buildMcpSection(connectedServers, mcpHub) : ""
 
-  // Build browser section only if supported
-  const browserSection = supportsComputerUse
-    ? buildBrowserSection(browserSettings)
-    : ""
+	// Build browser section only if supported
+	const browserSection = supportsComputerUse ? buildBrowserSection(browserSettings) : ""
 
-  return `You are Cline, a highly skilled software engineer with extensive knowledge in programming languages, frameworks, design patterns, and best practices.
+	return `You are Cline, a highly skilled software engineer with extensive knowledge in programming languages, frameworks, design patterns, and best practices.
 
 === TOOL USE ===
 
@@ -92,8 +87,8 @@ You have access to tools that are executed upon user approval. Use one tool per 
 </attempt_completion>
 
 ${
-  supportsComputerUse
-    ? `## browser_action
+	supportsComputerUse
+		? `## browser_action
 <browser_action>
 <action>launch/click/type/scroll_down/scroll_up/close</action>
 <url>URL for launch action</url>
@@ -101,11 +96,11 @@ ${
 <text>Text for type action</text>
 </browser_action>
 `
-    : ""
+		: ""
 }
 ${
-  mcpHub.getMode() !== "off"
-    ? `## use_mcp_tool
+	mcpHub.getMode() !== "off"
+		? `## use_mcp_tool
 <use_mcp_tool>
 <server_name>MCP server name</server_name>
 <tool_name>Tool name</tool_name>
@@ -118,7 +113,7 @@ ${
 <uri>Resource URI</uri>
 </access_mcp_resource>
 `
-    : ""
+		: ""
 }
 
 === CRITICAL RULES ===
@@ -184,25 +179,22 @@ Environment details are provided automatically at the end of each user message -
 
 // Helper to build MCP section
 function buildMcpSection(connectedServers: any[], mcpHub: McpHub): string {
-  if (connectedServers.length === 0) return ""
+	if (connectedServers.length === 0) return ""
 
-  return `
+	return `
 === MCP SERVERS ===
 
 ${connectedServers
-  .map((server) => {
-    const tools =
-      server.tools
-        ?.map((tool: any) => `- ${tool.name}: ${tool.description}`)
-        .join("\n") || "No tools available"
-    return `## ${server.name}\n${tools}`
-  })
-  .join("\n\n")}`
+	.map((server) => {
+		const tools = server.tools?.map((tool: any) => `- ${tool.name}: ${tool.description}`).join("\n") || "No tools available"
+		return `## ${server.name}\n${tools}`
+	})
+	.join("\n\n")}`
 }
 
 // Helper to build Browser section
 function buildBrowserSection(browserSettings: BrowserSettings): string {
-  return `
+	return `
 === BROWSER USAGE ===
 
 Use browser_action to interact with websites:
@@ -220,23 +212,23 @@ Results include screenshots and console logs for analysis.`
  * This is optionally inserted in the system prompt.
  */
 export function addUserInstructions(
-  settingsCustomInstructions?: string,
-  clineRulesFileInstructions?: string,
-  clineIgnoreInstructions?: string
+	settingsCustomInstructions?: string,
+	clineRulesFileInstructions?: string,
+	clineIgnoreInstructions?: string,
 ): string {
-  const parts: string[] = []
+	const parts: string[] = []
 
-  if (settingsCustomInstructions) {
-    parts.push("# Custom Instructions\n\n" + settingsCustomInstructions)
-  }
+	if (settingsCustomInstructions) {
+		parts.push("# Custom Instructions\n\n" + settingsCustomInstructions)
+	}
 
-  if (clineRulesFileInstructions) {
-    parts.push(clineRulesFileInstructions)
-  }
+	if (clineRulesFileInstructions) {
+		parts.push(clineRulesFileInstructions)
+	}
 
-  if (clineIgnoreInstructions) {
-    parts.push(clineIgnoreInstructions)
-  }
+	if (clineIgnoreInstructions) {
+		parts.push(clineIgnoreInstructions)
+	}
 
-  return parts.length > 0 ? parts.join("\n\n") + "\n\n" : ""
+	return parts.length > 0 ? parts.join("\n\n") + "\n\n" : ""
 }

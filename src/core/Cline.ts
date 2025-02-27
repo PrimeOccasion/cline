@@ -1342,28 +1342,32 @@ export class Cline {
 		if (previousApiReqIndex >= 0) {
 			const previousRequest = this.clineMessages[previousApiReqIndex]
 			if (previousRequest && previousRequest.text) {
-				// Extract token usage from previous request
-				const { tokensIn, tokensOut, cacheWrites, cacheReads }: ClineApiReqInfo = JSON.parse(previousRequest.text)
+				try {
+					// Extract token usage from previous request
+					const { tokensIn, tokensOut, cacheWrites, cacheReads }: ClineApiReqInfo = JSON.parse(previousRequest.text)
 
-				// Use the context manager to optimize history
-				const {
-					history: optimizedHistory,
-					deletedRange: newDeletedRange,
-					didSummarize,
-					messagesReplaced,
-				} = await this.contextManager.optimizeConversationHistory(
-					this.api,
-					this.apiConversationHistory,
-					this.conversationHistoryDeletedRange,
-				)
+					// Use the context manager to optimize history with 50% threshold
+					const {
+						history: optimizedHistory,
+						deletedRange: newDeletedRange,
+						didSummarize,
+						messagesReplaced,
+					} = await this.contextManager.optimizeConversationHistory(
+						this.api,
+						this.apiConversationHistory,
+						this.conversationHistoryDeletedRange,
+					)
 
-				if (didSummarize) {
-					// Update conversation history with optimized version
-					this.apiConversationHistory = optimizedHistory
-					this.conversationHistoryDeletedRange = newDeletedRange
-					await this.saveClineMessages()
+					if (didSummarize) {
+						// Update conversation history with optimized version
+						this.apiConversationHistory = optimizedHistory
+						this.conversationHistoryDeletedRange = newDeletedRange
+						await this.saveClineMessages()
 
-					console.log(`Summarized ${messagesReplaced} messages to maintain context window`)
+						console.log(`Summarized ${messagesReplaced} messages to maintain context window`)
+					}
+				} catch (error) {
+					console.error("Failed to optimize conversation history:", error)
 				}
 			}
 		}
@@ -1439,7 +1443,7 @@ export class Cline {
 			//throw new Error("No more content blocks to stream! This shouldn't happen...") // remove and just return after testing
 		}
 
-		const block = cloneDeep(this.assistantMessageContent[this.currentStreamingContentIndex]) // need to create copy bc while stream is updating the array, it could be updating the reference block properties too
+		const block = cloneDeep(this.assistantMessageContent[this.currentStreamingContentIndex])
 		switch (block.type) {
 			case "text": {
 				if (this.didRejectTool || this.didAlreadyUseTool) {
@@ -1447,13 +1451,6 @@ export class Cline {
 				}
 				let content = block.content
 				if (content) {
-					// (have to do this for partial and complete since sending content in thinking tags to markdown renderer will automatically be removed)
-					// Remove end substrings of <thinking or </thinking (below xml parsing is only for opening tags)
-					// (this is done with the xml parsing below now, but keeping here for reference)
-					// content = content.replace(/<\/?t(?:h(?:i(?:n(?:k(?:i(?:n(?:g)?)?)?)?)?)?)?$/, "")
-					// Remove all instances of <thinking> (with optional line break after) and </thinking> (with optional line break before)
-					// - Needs to be separate since we dont want to remove the line break before the first tag
-					// - Needs to happen before the xml parsing below
 					content = content.replace(/<thinking>\s?/g, "")
 					content = content.replace(/\s?<\/thinking>/g, "")
 
@@ -1531,15 +1528,16 @@ export class Cline {
 					}
 				}
 
+				// If user already rejected or we used a tool, skip processing this block
 				if (this.didRejectTool) {
-					// ignore any tool content after user has rejected tool once
+					// Skip and add a note about previous rejection
 					if (!block.partial) {
 						this.userMessageContent.push({
 							type: "text",
 							text: `Skipping tool ${toolDescription()} due to user rejecting a previous tool.`,
 						})
 					} else {
-						// partial tool after user rejected a previous tool
+						// Partial tool after rejection
 						this.userMessageContent.push({
 							type: "text",
 							text: `Tool ${toolDescription()} was interrupted and not executed due to user rejecting a previous tool.`,
@@ -3262,15 +3260,15 @@ export class Cline {
 
 			this.didCompleteReadingStream = true
 
-			// set any blocks to be complete to allow presentAssistantMessage to finish and set userMessageContentReady to true
-			// (could be a text block that had no subsequent tool uses, or a text block at the very end, or an invalid tool use, etc. whatever the case, presentAssistantMessage relies on these blocks either to be completed or the user to reject a block in order to proceed and eventually set userMessageContentReady to true)
+			// Finalize any remaining partial blocks when stream is complete
 			const partialBlocks = this.assistantMessageContent.filter((block) => block.partial)
 			partialBlocks.forEach((block) => {
 				block.partial = false
 			})
-			// this.assistantMessageContent.forEach((e) => (e.partial = false)) // cant just do this bc a tool could be in the middle of executing ()
+
+			// If there are partial blocks that were just finalized, present them
 			if (partialBlocks.length > 0) {
-				this.presentAssistantMessage() // if there is content to update then it will complete and update this.userMessageContentReady to true, which we pwaitfor before making the next request. all this is really doing is presenting the last partial message that we just set to complete
+				this.presentAssistantMessage()
 			}
 
 			updateApiReqMsg()
@@ -3333,7 +3331,27 @@ export class Cline {
 			return true // needs to be true so parent loop knows to end task
 		}
 	}
+	/**
+	 * Cleans thinking tags and partial XML fragments from text content
+	 * @param content The text content to clean
+	 * @param isPartial Whether this is a partial block that might have incomplete tags
+	 * @returns Cleaned text content
+	 */
+	private cleanThinkingTags(content: string | undefined, isPartial: boolean): string {
+		if (!content) return ""
 
+		// Remove <thinking> tags
+		content = content.replace(/<thinking>\s?/g, "").replace(/\s?<\/thinking>/g, "")
+
+		if (isPartial) {
+			// Remove incomplete tags at the end (<, </, or partial tag names)
+			const lastOpenIdx = content.lastIndexOf("<")
+			if (lastOpenIdx !== -1 && !content.slice(lastOpenIdx).includes(">")) {
+				content = content.slice(0, lastOpenIdx).trim()
+			}
+		}
+		return content
+	}
 	async loadContext(userContent: UserContent, includeFileDetails: boolean = false) {
 		return await Promise.all([
 			// This is a temporary solution to dynamically load context mentions from tool results. It checks for the presence of tags that indicate that the tool was rejected and feedback was provided (see formatToolDeniedFeedback, attemptCompletion, executeCommand, and consecutiveMistakeCount >= 3) or "<answer>" (see askFollowupQuestion), we place all user generated content in these tags so they can effectively be used as markers for when we should parse mentions). However if we allow multiple tools responses in the future, we will need to parse mentions specifically within the user content tags.
