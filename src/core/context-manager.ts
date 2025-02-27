@@ -36,7 +36,7 @@ export class ContextManager {
 		this.maxContextLength = maxContextLength || 128000 // Default to 128k if not specified
 		this.summaryPrompt =
 			"You are an expert assistant tasked with summarizing previous conversation context. Create a detailed summary that preserves all critical information including: 1) Key decisions and rationale, 2) Critical code snippets and file paths, 3) Important approaches, 4) Unresolved issues, 5) Actions taken. This summary will be used to maintain context in a technical conversation."
-		this.summarizationThreshold = 0.5 // 50% context usage triggers summarization
+		this.summarizationThreshold = 0.31 // Adjusted from 0.5 to 0.31 to target ~110k tokens
 	}
 
 	/**
@@ -73,7 +73,9 @@ export class ContextManager {
 		// Add role overhead
 		tokenCount += 4
 
-		return Math.ceil(tokenCount)
+		// Apply correction factor to account for XML tags and other factors
+		// that cause the estimation to be lower than actual token usage
+		return Math.ceil(tokenCount * 1.8)
 	}
 
 	/**

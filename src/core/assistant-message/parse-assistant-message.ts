@@ -18,7 +18,7 @@ export function parseAssistantMessage(assistantMessage: string) {
 		if (currentToolUse && currentParamName) {
 			const currentParamValue = accumulator.slice(currentParamValueStartIndex)
 			const paramClosingTag = `</${currentParamName}>`
-			
+
 			// Special handling for write_to_file content parameter
 			if (currentToolUse.name === "write_to_file" && currentParamName === "content") {
 				// Check if the current parameter value contains the closing tag
@@ -32,7 +32,7 @@ export function parseAssistantMessage(assistantMessage: string) {
 				// If no closing tag found, continue accumulating
 				continue
 			}
-			
+
 			// Regular parameter handling for other tools/params
 			if (currentParamValue.endsWith(paramClosingTag)) {
 				// end of param value

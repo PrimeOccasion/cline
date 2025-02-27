@@ -13,9 +13,7 @@ export async function SYSTEM_PROMPT(
 	browserSettings: BrowserSettings,
 ): Promise<string> {
 	// Identify connected MCP servers to display
-	const connectedServers = mcpHub
-		.getServers()
-		.filter((server) => server.status === "connected")
+	const connectedServers = mcpHub.getServers().filter((server) => server.status === "connected")
 
 	// Conditionally build MCP section
 	const mcpSection = mcpHub.getMode() !== "off" ? buildMcpSection(connectedServers, mcpHub) : ""
@@ -172,9 +170,7 @@ function buildMcpSection(connectedServers: any[], mcpHub: McpHub): string {
 
 ${connectedServers
 	.map((server) => {
-		const tools =
-			server.tools?.map((tool: any) => `- ${tool.name}: ${tool.description}`).join("\n") ||
-			"No tools available"
+		const tools = server.tools?.map((tool: any) => `- ${tool.name}: ${tool.description}`).join("\n") || "No tools available"
 		return `## ${server.name}\n${tools}`
 	})
 	.join("\n\n")}`
