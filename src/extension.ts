@@ -41,7 +41,7 @@ export function activate(context: vscode.ExtensionContext) {
 	context.subscriptions.push(
 		vscode.commands.registerCommand("dlcline.plusButtonClicked", async () => {
 			Logger.log("Plus button Clicked")
-			const provider = ClineProvider.getVisibleInstance() || sidebarProvider;
+			const provider = ClineProvider.getVisibleInstance() || sidebarProvider
 			await provider.clearTask()
 			await provider.postStateToWebview()
 			await provider.postMessageToWebview({
@@ -53,7 +53,7 @@ export function activate(context: vscode.ExtensionContext) {
 
 	context.subscriptions.push(
 		vscode.commands.registerCommand("dlcline.mcpButtonClicked", () => {
-			const provider = ClineProvider.getVisibleInstance() || sidebarProvider;
+			const provider = ClineProvider.getVisibleInstance() || sidebarProvider
 			provider.postMessageToWebview({
 				type: "action",
 				action: "mcpButtonClicked",
@@ -100,7 +100,7 @@ export function activate(context: vscode.ExtensionContext) {
 	context.subscriptions.push(
 		vscode.commands.registerCommand("dlcline.settingsButtonClicked", () => {
 			//vscode.window.showInformationMessage(message)
-			const provider = ClineProvider.getVisibleInstance() || sidebarProvider;
+			const provider = ClineProvider.getVisibleInstance() || sidebarProvider
 			provider.postMessageToWebview({
 				type: "action",
 				action: "settingsButtonClicked",
@@ -110,7 +110,7 @@ export function activate(context: vscode.ExtensionContext) {
 
 	context.subscriptions.push(
 		vscode.commands.registerCommand("dlcline.historyButtonClicked", () => {
-			const provider = ClineProvider.getVisibleInstance() || sidebarProvider;
+			const provider = ClineProvider.getVisibleInstance() || sidebarProvider
 			provider.postMessageToWebview({
 				type: "action",
 				action: "historyButtonClicked",
@@ -120,7 +120,7 @@ export function activate(context: vscode.ExtensionContext) {
 
 	context.subscriptions.push(
 		vscode.commands.registerCommand("dlcline.accountLoginClicked", () => {
-			const provider = ClineProvider.getVisibleInstance() || sidebarProvider;
+			const provider = ClineProvider.getVisibleInstance() || sidebarProvider
 			provider.postMessageToWebview({
 				type: "action",
 				action: "accountLoginClicked",

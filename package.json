@@ -46,15 +46,15 @@
 	"activationEvents": [],
 	"main": "./dist/extension.js",
 	"contributes": {
-	"viewsContainers": {
-		"activitybar": [
-			{
-				"id": "dlcline-ActivityBar",
-				"title": "DLCline",
-				"icon": "assets/icons/icon.svg"
-			}
-		]
-	},
+		"viewsContainers": {
+			"activitybar": [
+				{
+					"id": "dlcline-ActivityBar",
+					"title": "DLCline",
+					"icon": "assets/icons/icon.svg"
+				}
+			]
+		},
 		"views": {
 			"dlcline-ActivityBar": [
 				{
