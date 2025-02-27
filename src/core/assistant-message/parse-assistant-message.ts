@@ -18,6 +18,22 @@ export function parseAssistantMessage(assistantMessage: string) {
 		if (currentToolUse && currentParamName) {
 			const currentParamValue = accumulator.slice(currentParamValueStartIndex)
 			const paramClosingTag = `</${currentParamName}>`
+			
+			// Special handling for write_to_file content parameter
+			if (currentToolUse.name === "write_to_file" && currentParamName === "content") {
+				// Check if the current parameter value contains the closing tag
+				const closingTagIndex = currentParamValue.lastIndexOf(paramClosingTag)
+				if (closingTagIndex !== -1) {
+					// Extract content up to the closing tag
+					currentToolUse.params[currentParamName] = currentParamValue.slice(0, closingTagIndex).trim()
+					currentParamName = undefined
+					continue
+				}
+				// If no closing tag found, continue accumulating
+				continue
+			}
+			
+			// Regular parameter handling for other tools/params
 			if (currentParamValue.endsWith(paramClosingTag)) {
 				// end of param value
 				currentToolUse.params[currentParamName] = currentParamValue.slice(0, -paramClosingTag.length).trim()
@@ -53,7 +69,8 @@ export function parseAssistantMessage(assistantMessage: string) {
 
 				// there's no current param, and not starting a new param
 
-				// special case for write_to_file where file contents could contain the closing tag, in which case the param would have closed and we end up with the rest of the file contents here. To work around this, we get the string between the starting content tag and the LAST content tag.
+				// This is a fallback for write_to_file where file contents could contain the closing tag, in which case the param would have closed and we end up with the rest of the file contents here.
+				// This should rarely be needed now with the improved handling above, but keeping as a safety net.
 				const contentParamName: ToolParamName = "content"
 				if (currentToolUse.name === "write_to_file" && accumulator.endsWith(`</${contentParamName}>`)) {
 					const toolContent = accumulator.slice(currentToolUseStartIndex)
