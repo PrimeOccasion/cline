@@ -1,7 +1,6 @@
-// src/core/context-manager.ts
-
 import { Anthropic } from "@anthropic-ai/sdk"
 import { ApiHandler } from "../api"
+import * as SlidingWindow from "./sliding-window"
 
 // Interface for context analysis results
 interface ContextAnalysis {
@@ -19,28 +18,31 @@ interface OptimizationResult {
 	messagesReplaced?: number
 }
 
-// Define summarization strategies
-type SummarizationStrategy = "light" | "standard" | "aggressive" | "emergency"
+// Define memory refresh strategies
+type MemoryStrategy = "light" | "standard" | "aggressive" | "emergency"
 
 /**
- * Optimized context management for tracking and summarizing conversation
+ * Context management using LLM-based memory rather than truncation
  */
 export class ContextManager {
 	private model: string
 	private maxContextLength: number
-	private summaryPrompt: string
-	private summarizationThreshold: number
+	private memoryThreshold: number
+	private emergencyThreshold: number
+	private lastMemoryRefreshTokenCount: number = 0
+	private memoryRefreshCount: number = 0
 
 	constructor(model: string, maxContextLength: number) {
 		this.model = model
-		this.maxContextLength = maxContextLength || 128000 // Default to 128k if not specified
-		this.summaryPrompt =
-			"You are an expert assistant tasked with summarizing previous conversation context. Create a detailed summary that preserves all critical information including: 1) Key decisions and rationale, 2) Critical code snippets and file paths, 3) Important approaches, 4) Unresolved issues, 5) Actions taken. This summary will be used to maintain context in a technical conversation."
-		this.summarizationThreshold = 0.31 // Adjusted from 0.5 to 0.31 to target ~110k tokens
+		this.maxContextLength = maxContextLength || 128000
+
+		// Thresholds for memory refresh
+		this.memoryThreshold = 0.7 // Start memory refresh at 70% (earlier than before)
+		this.emergencyThreshold = 0.9 // Emergency mode at 90%
 	}
 
 	/**
-	 * Estimates token count for a message more accurately than naive character count
+	 * Estimates token count for a message
 	 */
 	private estimateTokenCount(message: Anthropic.MessageParam): number {
 		let tokenCount = 0
@@ -73,13 +75,12 @@ export class ContextManager {
 		// Add role overhead
 		tokenCount += 4
 
-		// Apply correction factor to account for XML tags and other factors
-		// that cause the estimation to be lower than actual token usage
+		// Apply correction factor
 		return Math.ceil(tokenCount * 1.8)
 	}
 
 	/**
-	 * Analyzes conversation to determine if summarization is needed
+	 * Analyzes conversation to determine if memory refresh is needed
 	 */
 	public analyzeConversation(messages: Anthropic.MessageParam[]): ContextAnalysis {
 		let totalTokens = 0
@@ -91,16 +92,34 @@ export class ContextManager {
 
 		const utilizationPercentage = totalTokens / this.maxContextLength
 
-		// Force summarization at high utilization regardless of threshold
-		const needsSummarization =
-			utilizationPercentage >= 0.7 || // Force at 70%
-			totalTokens >= this.maxContextLength * this.summarizationThreshold
+		// Memory refresh needed?
+		let needsSummarization = false
 
+		// If this is the first refresh, use the standard threshold
+		if (this.memoryRefreshCount === 0) {
+			needsSummarization = utilizationPercentage >= this.memoryThreshold
+		}
+		// For subsequent refreshes, check token growth since last refresh
+		else {
+			const tokenGrowth = totalTokens - this.lastMemoryRefreshTokenCount
+			const growthPercentage = tokenGrowth / this.maxContextLength
+
+			// Only refresh if we've grown by at least 15% since last refresh
+			// OR if we're in emergency territory
+			needsSummarization =
+				(growthPercentage >= 0.15 && utilizationPercentage >= this.memoryThreshold) ||
+				utilizationPercentage >= this.emergencyThreshold
+		}
+
+		// Log detailed analysis
 		console.log(
 			`[ContextManager] Analysis: ${Math.round(utilizationPercentage * 100)}% used, ${totalTokens}/${this.maxContextLength} tokens`,
 		)
 		console.log(
-			`[ContextManager] Need summarization: ${needsSummarization}, threshold: ${Math.round(this.summarizationThreshold * 100)}%`,
+			`[ContextManager] Last memory refresh at: ${this.lastMemoryRefreshTokenCount} tokens, count: ${this.memoryRefreshCount}`,
+		)
+		console.log(
+			`[ContextManager] Need memory refresh: ${needsSummarization}, threshold: ${Math.round(this.memoryThreshold * 100)}%`,
 		)
 
 		return {
@@ -112,207 +131,148 @@ export class ContextManager {
 	}
 
 	/**
-	 * Formats messages for summarization in an efficient way
+	 * Determines the appropriate memory strategy based on token utilization
 	 */
-	private formatMessagesForSummary(messages: Anthropic.MessageParam[]): string {
-		return messages
-			.map((msg) => {
-				const role = msg.role.toUpperCase()
-				const content = Array.isArray(msg.content)
-					? msg.content
-							.map((block) => {
-								if (block.type === "text") return block.text
-								if (block.type === "tool_use") return `[Used tool: ${block.name}]`
-								if (block.type === "tool_result") return `[Tool result]`
-								return ""
-							})
-							.filter(Boolean)
-							.join("\n")
-					: msg.content
-				return `${role}: ${content}\n\n`
-			})
-			.join("")
+	private getMemoryStrategy(utilization: number): MemoryStrategy {
+		if (utilization >= this.emergencyThreshold) return "emergency"
+		if (utilization >= this.memoryThreshold + 0.15) return "aggressive"
+		if (utilization >= this.memoryThreshold) return "standard"
+		return "light"
 	}
 
 	/**
-	 * Creates an optimized summary of conversation messages
+	 * Creates a memory structure for the conversation using the LLM
 	 */
-	public async createSummary(api: ApiHandler, messagesToSummarize: Anthropic.MessageParam[]): Promise<string> {
+	public async createMemoryStructure(
+		api: ApiHandler,
+		messages: Anthropic.MessageParam[],
+		strategy: MemoryStrategy,
+	): Promise<string> {
 		try {
-			// Format conversation to be summarized
-			const conversationText = this.formatMessagesForSummary(messagesToSummarize)
+			// Generate prompt for memory organization based on strategy
+			const prompt = SlidingWindow.createMemoryOrganizationPrompt(messages)
 
-			// Create the request stream
-			const stream = api.createMessage(this.summaryPrompt, [
+			// Add strategy-specific instructions
+			let strategyInstructions = ""
+			switch (strategy) {
+				case "emergency":
+					strategyInstructions =
+						"This is an EMERGENCY context situation (very high token usage). Create an extremely focused and concise memory structure."
+					break
+				case "aggressive":
+					strategyInstructions =
+						"Token usage is high. Create a focused memory structure that prioritizes the most important information."
+					break
+				case "standard":
+					strategyInstructions = "Create a balanced memory structure that organizes key information efficiently."
+					break
+				case "light":
+					strategyInstructions = "Create a comprehensive memory structure that organizes all important details."
+					break
+			}
+
+			// Create memory structure request
+			const fullPrompt = `${strategyInstructions}\n\n${prompt}`
+
+			// Call the API to create the memory structure
+			const stream = api.createMessage("You are an AI assistant organizing your memory of a technical conversation.", [
 				{
 					role: "user",
-					content: [
-						{
-							type: "text",
-							text: `Please summarize the following conversation, focusing on key details, code changes, and progress:\n\n${conversationText}`,
-						},
-					],
+					content: [{ type: "text", text: fullPrompt }],
 				},
 			])
 
-			// Collect summary from stream
-			let summary = ""
+			// Collect memory structure from stream
+			let memoryStructure = ""
 			for await (const chunk of stream) {
 				if (chunk.type === "text") {
-					summary += chunk.text
+					memoryStructure += chunk.text
 				}
 			}
 
-			// Add a clear header
-			return "## CONTEXT SUMMARY\n\n" + summary
+			return memoryStructure
 		} catch (error) {
-			console.error("Failed to create context summary:", error)
-			return (
-				"## CONTEXT SUMMARY\n\n" +
-				"Previous conversation included technical discussions and code edits that have been summarized due to context limits."
-			)
+			console.error("Failed to create memory structure:", error)
+
+			// Fallback memory structure
+			return `# MEMORY STRUCTURE
+
+## CURRENT TASK
+I'm continuing to help with the current task, focusing on maintaining context in our conversation.
+
+## CODE CONTEXT
+I'm maintaining awareness of the code files, paths, and implementation details we've discussed.
+
+## TECHNICAL DECISIONS
+I remember our key technical decisions and their rationales.
+
+## NEXT STEPS
+I'll continue helping with the implementation as we discussed.`
 		}
 	}
 
 	/**
-	 * Determines the optimal summarization strategy
-	 */
-	private getSummarizationStrategy(utilization: number): SummarizationStrategy {
-		if (utilization > 0.9) return "emergency" // keep only ~10%
-		if (utilization > 0.8) return "aggressive" // keep only ~20%
-		if (utilization > 0.6) return "standard" // keep ~40%
-		return "light" // keep ~60%
-	}
-
-	/**
-	 * Get the range of messages to summarize based on strategy
-	 */
-	private getMessageRange(
-		messages: Anthropic.MessageParam[],
-		deletedRange: [number, number] | undefined,
-		strategy: SummarizationStrategy,
-	): [number, number] {
-		const totalMessages = messages.length
-		// Always keep the first (task) message
-		const start = 1
-		let end: number
-
-		switch (strategy) {
-			case "emergency":
-				end = Math.floor(totalMessages * 0.9)
-				break
-			case "aggressive":
-				end = Math.floor(totalMessages * 0.8)
-				break
-			case "standard":
-				end = Math.floor(totalMessages * 0.6)
-				break
-			case "light":
-			default:
-				end = Math.floor(totalMessages * 0.4)
-				break
-		}
-
-		// Ensure we have at least some messages to summarize
-		if (end <= start) {
-			// If we can't summarize due to previous deletions, try to summarize at least 20% of messages after the task
-			end = Math.max(start + Math.floor((totalMessages - start) * 0.2), start + 1)
-			console.log(`[ContextManager] Adjusted range to ensure summarization: [${start}, ${end}]`)
-		}
-
-		// Adjust for previously deleted ranges to avoid re-summarizing
-		if (deletedRange) {
-			const adjustedEnd = Math.min(end, deletedRange[0] - 1)
-
-			// If adjustment would make range invalid, force summarization of newer content
-			if (adjustedEnd <= start) {
-				// Find a new range after the deleted range
-				const newStart = deletedRange[1] + 1
-				const newEnd = Math.min(newStart + Math.floor((totalMessages - newStart) * 0.5), totalMessages - 1)
-
-				// Only use this new range if it's valid
-				if (newEnd > newStart && newStart < totalMessages) {
-					console.log(`[ContextManager] Using new range after deleted range: [${newStart}, ${newEnd}]`)
-					return [newStart, newEnd]
-				}
-
-				// If we can't find a valid range after deleted range, use original end
-				console.log(`[ContextManager] Using original range despite deleted range: [${start}, ${end}]`)
-				return [start, end]
-			}
-
-			end = adjustedEnd
-		}
-
-		return [start, end]
-	}
-
-	/**
-	 * Summarize older messages, returning new conversation
+	 * Optimize conversation history using LLM memory management instead of truncation
 	 */
 	public async optimizeConversationHistory(
 		api: ApiHandler,
 		history: Anthropic.MessageParam[],
 		deletedRange: [number, number] | undefined,
 	): Promise<OptimizationResult> {
+		// Analyze conversation to determine if memory refresh is needed
 		const analysis = this.analyzeConversation(history)
 		console.log(
-			`[ContextManager] Starting optimization with ${history.length} messages, utilization: ${Math.round(analysis.utilizationPercentage * 100)}%`,
+			`[ContextManager] Starting memory optimization with ${history.length} messages, utilization: ${Math.round(analysis.utilizationPercentage * 100)}%`,
 		)
 
-		// If summarization not needed, do nothing
+		// If memory refresh not needed, return unchanged
 		if (!analysis.needsSummarization) {
-			console.log(`[ContextManager] Summarization not needed, skipping`)
+			console.log(`[ContextManager] Memory refresh not needed, skipping`)
 			return {
 				history,
-				deletedRange,
+				deletedRange: undefined, // No deletion range since we don't truncate
 				didSummarize: false,
 			}
 		}
 
-		// Determine strategy and message range
-		const strategy = this.getSummarizationStrategy(analysis.utilizationPercentage)
-		console.log(`[ContextManager] Using ${strategy} summarization strategy`)
+		// Determine memory strategy based on current token usage
+		const strategy = this.getMemoryStrategy(analysis.utilizationPercentage)
+		console.log(`[ContextManager] Using ${strategy} memory strategy for ${analysis.totalTokens} tokens`)
 
-		const [start, end] = this.getMessageRange(history, deletedRange, strategy)
-		console.log(`[ContextManager] Message range to summarize: [${start}, ${end}]`)
+		// STEP 1: Create memory refresh notification message
+		const refreshMessage = SlidingWindow.createMemoryRefreshMessage(analysis.totalTokens, this.maxContextLength)
+		console.log(`[ContextManager] Created memory refresh notification message`)
 
-		// Generate summary of messages to be replaced
-		const messagesToSummarize = history.slice(start, end + 1)
-		if (messagesToSummarize.length === 0) {
-			console.log(`[ContextManager] No messages to summarize, skipping`)
-			return {
-				history,
-				deletedRange,
-				didSummarize: false,
-			}
-		}
+		// STEP 2: Create memory structure
+		console.log(`[ContextManager] Requesting memory structure from LLM`)
+		const memoryStructureText = await this.createMemoryStructure(api, history, strategy)
 
-		console.log(`[ContextManager] Summarizing ${messagesToSummarize.length} messages`)
-		const summary = await this.createSummary(api, messagesToSummarize)
-
-		// Create new history with summary
-		const taskMessage = history[0]
-		const summaryMessage: Anthropic.MessageParam = {
+		// Create memory structure message
+		const memoryStructureMessage: Anthropic.MessageParam = {
 			role: "assistant",
-			content: [{ type: "text", text: summary }],
+			content: [{ type: "text", text: memoryStructureText }],
 		}
-		const recentMessages = history.slice(end + 1)
 
-		const newHistory = [taskMessage, summaryMessage, ...recentMessages]
-		const newDeletedRange = deletedRange
-			? ([Math.min(start, deletedRange[0]), Math.max(end, deletedRange[1])] as [number, number])
-			: ([start, end] as [number, number])
+		// STEP 3: Add both messages to history (NO TRUNCATION)
+		const newHistory = [
+			...history, // Keep all original messages
+			refreshMessage, // Add refresh notification
+			memoryStructureMessage, // Add memory structure
+		]
+
+		// Update memory refresh tracking
+		this.lastMemoryRefreshTokenCount = newHistory.reduce((sum, msg) => sum + this.estimateTokenCount(msg), 0)
+		this.memoryRefreshCount++
 
 		console.log(
-			`[ContextManager] Summarization complete. New history has ${newHistory.length} messages (reduced from ${history.length})`,
+			`[ContextManager] Memory refresh #${this.memoryRefreshCount} complete. New history has ${newHistory.length} messages (added 2 messages). Token count: ${this.lastMemoryRefreshTokenCount}`,
 		)
 
 		return {
 			history: newHistory,
-			deletedRange: newDeletedRange,
+			deletedRange: undefined, // No deletion range since we don't truncate
 			didSummarize: true,
-			messagesReplaced: messagesToSummarize.length,
+			messagesReplaced: 0, // No messages replaced, only added
 		}
 	}
 }
