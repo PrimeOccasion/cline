@@ -39,11 +39,12 @@ export function activate(context: vscode.ExtensionContext) {
 	)
 
 	context.subscriptions.push(
-		vscode.commands.registerCommand("cline.plusButtonClicked", async () => {
+		vscode.commands.registerCommand("dlcline.plusButtonClicked", async () => {
 			Logger.log("Plus button Clicked")
-			await sidebarProvider.clearTask()
-			await sidebarProvider.postStateToWebview()
-			await sidebarProvider.postMessageToWebview({
+			const provider = ClineProvider.getVisibleInstance() || sidebarProvider;
+			await provider.clearTask()
+			await provider.postStateToWebview()
+			await provider.postMessageToWebview({
 				type: "action",
 				action: "chatButtonClicked",
 			})
@@ -51,8 +52,9 @@ export function activate(context: vscode.ExtensionContext) {
 	)
 
 	context.subscriptions.push(
-		vscode.commands.registerCommand("cline.mcpButtonClicked", () => {
-			sidebarProvider.postMessageToWebview({
+		vscode.commands.registerCommand("dlcline.mcpButtonClicked", () => {
+			const provider = ClineProvider.getVisibleInstance() || sidebarProvider;
+			provider.postMessageToWebview({
 				type: "action",
 				action: "mcpButtonClicked",
 			})
@@ -74,7 +76,7 @@ export function activate(context: vscode.ExtensionContext) {
 		}
 		const targetCol = hasVisibleEditors ? Math.max(lastCol + 1, 1) : vscode.ViewColumn.Two
 
-		const panel = vscode.window.createWebviewPanel(ClineProvider.tabPanelId, "Cline", targetCol, {
+		const panel = vscode.window.createWebviewPanel(ClineProvider.tabPanelId, "DLCline", targetCol, {
 			enableScripts: true,
 			retainContextWhenHidden: true,
 			localResourceRoots: [context.extensionUri],
@@ -92,13 +94,14 @@ export function activate(context: vscode.ExtensionContext) {
 		await vscode.commands.executeCommand("workbench.action.lockEditorGroup")
 	}
 
-	context.subscriptions.push(vscode.commands.registerCommand("cline.popoutButtonClicked", openClineInNewTab))
-	context.subscriptions.push(vscode.commands.registerCommand("cline.openInNewTab", openClineInNewTab))
+	context.subscriptions.push(vscode.commands.registerCommand("dlcline.popoutButtonClicked", openClineInNewTab))
+	context.subscriptions.push(vscode.commands.registerCommand("dlcline.openInNewTab", openClineInNewTab))
 
 	context.subscriptions.push(
-		vscode.commands.registerCommand("cline.settingsButtonClicked", () => {
+		vscode.commands.registerCommand("dlcline.settingsButtonClicked", () => {
 			//vscode.window.showInformationMessage(message)
-			sidebarProvider.postMessageToWebview({
+			const provider = ClineProvider.getVisibleInstance() || sidebarProvider;
+			provider.postMessageToWebview({
 				type: "action",
 				action: "settingsButtonClicked",
 			})
@@ -106,8 +109,9 @@ export function activate(context: vscode.ExtensionContext) {
 	)
 
 	context.subscriptions.push(
-		vscode.commands.registerCommand("cline.historyButtonClicked", () => {
-			sidebarProvider.postMessageToWebview({
+		vscode.commands.registerCommand("dlcline.historyButtonClicked", () => {
+			const provider = ClineProvider.getVisibleInstance() || sidebarProvider;
+			provider.postMessageToWebview({
 				type: "action",
 				action: "historyButtonClicked",
 			})
@@ -115,8 +119,9 @@ export function activate(context: vscode.ExtensionContext) {
 	)
 
 	context.subscriptions.push(
-		vscode.commands.registerCommand("cline.accountLoginClicked", () => {
-			sidebarProvider.postMessageToWebview({
+		vscode.commands.registerCommand("dlcline.accountLoginClicked", () => {
+			const provider = ClineProvider.getVisibleInstance() || sidebarProvider;
+			provider.postMessageToWebview({
 				type: "action",
 				action: "accountLoginClicked",
 			})

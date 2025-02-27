@@ -761,7 +761,60 @@ export class Cline {
 	}
 
 	// Task lifecycle
-
+	private async createContextSummary(messagesToSummarize: Anthropic.MessageParam[]): Promise<string> {
+		try {
+			// Create a system prompt specifically for summarization
+			const summarySystemPrompt = "You are an expert assistant tasked with summarizing previous conversation context. Create a detailed summary that preserves all critical information including: 1) Key decisions and their rationale, 2) Critical code snippets and file paths, 3) Important problem-solving approaches, 4) Unresolved issues, and 5) Actions taken. This summary will be used to maintain context in an ongoing technical conversation.";
+			
+			// Format the conversation to be summarized
+			const conversationText = messagesToSummarize.map(msg => {
+				const role = msg.role.toUpperCase();
+				const content = Array.isArray(msg.content) 
+					? msg.content.map(block => {
+						if (block.type === 'text') {
+							return block.text;
+						}
+						if (block.type === 'tool_use') {
+							return `[Used tool: ${block.name}]`;
+						}
+						if (block.type === 'tool_result') {
+							return `[Tool result]`;
+						}
+						return '';
+					}).join('\n')
+					: msg.content;
+				return `${role}: ${content}\n\n`;
+			}).join('');
+			
+			// This uses the existing createMessage method but captures the entire output rather than streaming it
+			// We'll use a simple stream collecting approach
+			const stream = this.api.createMessage(
+				summarySystemPrompt, 
+				[{ 
+					role: "user", 
+					content: [{ 
+						type: "text", 
+						text: `Please summarize the following conversation, focusing on preserving all technical details, decisions, code changes, and progress:\n\n${conversationText}` 
+					}] 
+				}]
+			);
+			
+			// Collect all the output from the stream
+			let summary = "";
+			for await (const chunk of stream) {
+				if (chunk.type === 'text') {
+					summary += chunk.text;
+				}
+			}
+			
+			// Add a clear header to the summary
+			return "## CONTEXT SUMMARY\n\n" + summary;
+		} catch (error) {
+			console.error("Failed to create context summary:", error);
+			return "## CONTEXT SUMMARY\n\nPrevious conversation included technical discussions, code edits, and task progress that has been summarized due to context limitations.";
+		}
+	}
+	
 	private async startTask(task?: string, images?: string[]): Promise<void> {
 		// conversationHistory (for API) and clineMessages (for webview) need to be in sync
 		// if the extension process were killed, then on restart the clineMessages might not be empty, so we need to set it to [] when we create a new Cline client (otherwise webview would show stale messages from previous session)
@@ -1261,7 +1314,7 @@ export class Cline {
 			throw new Error("MCP hub not available")
 		}
 
-		const disableBrowserTool = vscode.workspace.getConfiguration("cline").get<boolean>("disableBrowserTool") ?? false
+		const disableBrowserTool = vscode.workspace.getConfiguration("dlcline").get<boolean>("disableBrowserTool") ?? false
 		const modelSupportsComputerUse = this.api.getModel().info.supportsComputerUse ?? false
 
 		const supportsComputerUse = modelSupportsComputerUse && !disableBrowserTool // only enable computer use if the model supports it and the user hasn't disabled it
@@ -1289,54 +1342,106 @@ export class Cline {
 		}
 
 		if (settingsCustomInstructions || clineRulesFileInstructions) {
-			// altering the system prompt mid-task will break the prompt cache, but in the grand scheme this will not change often so it's better to not pollute user messages with it the way we have to with <potentially relevant details>
-			systemPrompt += addUserInstructions(settingsCustomInstructions, clineRulesFileInstructions, clineIgnoreInstructions)
+			// Always include custom instructions at the beginning of the system prompt,
+			// with clear markers to ensure they're not overlooked
+			const userInstructions = addUserInstructions(
+				settingsCustomInstructions, 
+				clineRulesFileInstructions, 
+				clineIgnoreInstructions
+			);
+			
+			// Place the instructions at the beginning, right after "You are Cline" introduction
+			// to ensure they have maximum prominence
+			const youAreClinePos = systemPrompt.indexOf("You are Cline");
+			if (youAreClinePos !== -1) {
+				// Find the end of the first paragraph
+				const endOfFirstPara = systemPrompt.indexOf("\n\n", youAreClinePos);
+				if (endOfFirstPara !== -1) {
+					// Insert right after the first paragraph
+					systemPrompt = 
+						systemPrompt.substring(0, endOfFirstPara + 2) + 
+						userInstructions +
+						systemPrompt.substring(endOfFirstPara + 2);
+				} else {
+					// Fallback to just prepending
+					systemPrompt = userInstructions + systemPrompt;
+				}
+			} else {
+				// Fallback to just prepending
+				systemPrompt = userInstructions + systemPrompt;
+			}
 		}
-
 		// If the previous API request's total token usage is close to the context window, truncate the conversation history to free up space for the new request
 		if (previousApiReqIndex >= 0) {
-			const previousRequest = this.clineMessages[previousApiReqIndex]
+			const previousRequest = this.clineMessages[previousApiReqIndex];
 			if (previousRequest && previousRequest.text) {
-				const { tokensIn, tokensOut, cacheWrites, cacheReads }: ClineApiReqInfo = JSON.parse(previousRequest.text)
-				const totalTokens = (tokensIn || 0) + (tokensOut || 0) + (cacheWrites || 0) + (cacheReads || 0)
-				let contextWindow = this.api.getModel().info.contextWindow || 128_000
-				// FIXME: hack to get anyone using openai compatible with deepseek to have the proper context window instead of the default 128k. We need a way for the user to specify the context window for models they input through openai compatible
+				const { tokensIn, tokensOut, cacheWrites, cacheReads }: ClineApiReqInfo = JSON.parse(previousRequest.text);
+				const totalTokens = (tokensIn || 0) + (tokensOut || 0) + (cacheWrites || 0) + (cacheReads || 0);
+				let contextWindow = this.api.getModel().info.contextWindow || 128_000;
 				if (this.api instanceof OpenAiHandler && this.api.getModel().id.toLowerCase().includes("deepseek")) {
-					contextWindow = 64_000
+					contextWindow = 64_000;
 				}
-				let maxAllowedSize: number
+				let maxAllowedSize: number;
 				switch (contextWindow) {
 					case 64_000: // deepseek models
-						maxAllowedSize = contextWindow - 27_000
-						break
+						maxAllowedSize = contextWindow - 27_000;
+						break;
 					case 128_000: // most models
-						maxAllowedSize = contextWindow - 30_000
-						break
+						maxAllowedSize = contextWindow - 30_000;
+						break;
 					case 200_000: // claude models
-						maxAllowedSize = contextWindow - 40_000
-						break
+						maxAllowedSize = contextWindow - 40_000;
+						break;
 					default:
-						maxAllowedSize = Math.max(contextWindow - 40_000, contextWindow * 0.8) // for deepseek, 80% of 64k meant only ~10k buffer which was too small and resulted in users getting context window errors.
+						maxAllowedSize = Math.max(contextWindow - 40_000, contextWindow * 0.8);
 				}
-
-				// This is the most reliable way to know when we're close to hitting the context window.
-				if (totalTokens >= maxAllowedSize) {
-					// Since the user may switch between models with different context windows, truncating half may not be enough (ie if switching from claude 200k to deepseek 64k, half truncation will only remove 100k tokens, but we need to remove much more)
-					// So if totalTokens/2 is greater than maxAllowedSize, we truncate 3/4 instead of 1/2
-					// FIXME: truncating the conversation in a way that is optimal for prompt caching AND takes into account multi-context window complexity is something we need to improve
-					const keep = totalTokens / 2 > maxAllowedSize ? "quarter" : "half"
-
-					// NOTE: it's okay that we overwriteConversationHistory in resume task since we're only ever removing the last user message and not anything in the middle which would affect this range
-					this.conversationHistoryDeletedRange = getNextTruncationRange(
+		
+				// When approaching context limits, summarize older parts of the conversation
+				if (totalTokens >= maxAllowedSize * 0.5) {
+					// Determine which messages would be truncated under the old system
+					const keep = totalTokens / 2 > maxAllowedSize ? "quarter" : "half";
+					const [start, end] = getNextTruncationRange(
 						this.apiConversationHistory,
 						this.conversationHistoryDeletedRange,
-						keep,
-					)
-					await this.saveClineMessages() // saves task history item which we use to keep track of conversation history deleted range
-					// await this.overwriteApiConversationHistory(truncatedMessages)
+						keep
+					);
+					
+					// Generate a summary of the messages that would be truncated
+					const messagesToSummarize = this.apiConversationHistory.slice(start, end + 1);
+					const summary = await this.createContextSummary(messagesToSummarize);
+					
+					// Create a new conversation history with the summary replacing old messages
+					// Keep the first message (task)
+					const taskMessage = this.apiConversationHistory[0];
+					// Create a message with the summary
+					const summaryMessage: Anthropic.MessageParam = {
+						role: "assistant",
+						content: [{ 
+							type: "text", 
+							text: summary 
+						}]
+					};
+					// Keep the more recent messages
+					const recentMessages = this.apiConversationHistory.slice(end + 1);
+					
+					// Replace the conversation history
+					this.apiConversationHistory = [
+						taskMessage,
+						summaryMessage,
+						...recentMessages
+					];
+					
+					// Update the deleted range
+					this.conversationHistoryDeletedRange = [start, end];
+					await this.saveClineMessages();
+					
+					console.log(`Summarized ${end - start + 1} messages to maintain context window`);
 				}
 			}
 		}
+		
+		// Use the conversation history that may now include summaries
+		const conversationHistory = this.apiConversationHistory;
 
 		// conversationHistoryDeletedRange is updated only when we're close to hitting the context window, so we don't continuously break the prompt cache
 		const truncatedConversationHistory = getTruncatedMessages(

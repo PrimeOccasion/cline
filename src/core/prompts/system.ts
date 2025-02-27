@@ -994,9 +994,14 @@ export function addUserInstructions(
 	return `
 ====
 
-USER'S CUSTOM INSTRUCTIONS
+PERSISTENT USER INSTRUCTIONS - APPLY TO EVERY MESSAGE
 
-The following additional instructions are provided by the user, and should be followed to the best of your ability without interfering with the TOOL USE guidelines.
+The following instructions from the user MUST be applied consistently to EVERY message you generate, regardless of other context or task requirements. These are standing directives that apply throughout the entire conversation:
 
-${customInstructions.trim()}`
+${customInstructions.trim()}
+
+These instructions are primary directives that must be followed for all responses, while still respecting the tool use guidelines. Do not dismiss these instructions under any circumstances.
+====
+
+`
 }
