@@ -20,7 +20,7 @@ interface OptimizationResult {
 }
 
 // Define summarization strategies
-type SummarizationStrategy = "light" | "standard" | "aggressive"
+type SummarizationStrategy = "light" | "standard" | "aggressive" | "emergency"
 
 /**
  * Optimized context management for tracking and summarizing conversation
@@ -89,10 +89,24 @@ export class ContextManager {
 			totalTokens += this.estimateTokenCount(message)
 		})
 
+		const utilizationPercentage = totalTokens / this.maxContextLength
+
+		// Force summarization at high utilization regardless of threshold
+		const needsSummarization =
+			utilizationPercentage >= 0.7 || // Force at 70%
+			totalTokens >= this.maxContextLength * this.summarizationThreshold
+
+		console.log(
+			`[ContextManager] Analysis: ${Math.round(utilizationPercentage * 100)}% used, ${totalTokens}/${this.maxContextLength} tokens`,
+		)
+		console.log(
+			`[ContextManager] Need summarization: ${needsSummarization}, threshold: ${Math.round(this.summarizationThreshold * 100)}%`,
+		)
+
 		return {
 			totalTokens,
-			utilizationPercentage: totalTokens / this.maxContextLength,
-			needsSummarization: totalTokens >= this.maxContextLength * this.summarizationThreshold,
+			utilizationPercentage,
+			needsSummarization,
 			messageCount: messages.length,
 		}
 	}
@@ -164,6 +178,7 @@ export class ContextManager {
 	 * Determines the optimal summarization strategy
 	 */
 	private getSummarizationStrategy(utilization: number): SummarizationStrategy {
+		if (utilization > 0.9) return "emergency" // keep only ~10%
 		if (utilization > 0.8) return "aggressive" // keep only ~20%
 		if (utilization > 0.6) return "standard" // keep ~40%
 		return "light" // keep ~60%
@@ -183,6 +198,9 @@ export class ContextManager {
 		let end: number
 
 		switch (strategy) {
+			case "emergency":
+				end = Math.floor(totalMessages * 0.9)
+				break
 			case "aggressive":
 				end = Math.floor(totalMessages * 0.8)
 				break
@@ -195,9 +213,35 @@ export class ContextManager {
 				break
 		}
 
+		// Ensure we have at least some messages to summarize
+		if (end <= start) {
+			// If we can't summarize due to previous deletions, try to summarize at least 20% of messages after the task
+			end = Math.max(start + Math.floor((totalMessages - start) * 0.2), start + 1)
+			console.log(`[ContextManager] Adjusted range to ensure summarization: [${start}, ${end}]`)
+		}
+
 		// Adjust for previously deleted ranges to avoid re-summarizing
 		if (deletedRange) {
-			end = Math.min(end, deletedRange[0] - 1)
+			const adjustedEnd = Math.min(end, deletedRange[0] - 1)
+
+			// If adjustment would make range invalid, force summarization of newer content
+			if (adjustedEnd <= start) {
+				// Find a new range after the deleted range
+				const newStart = deletedRange[1] + 1
+				const newEnd = Math.min(newStart + Math.floor((totalMessages - newStart) * 0.5), totalMessages - 1)
+
+				// Only use this new range if it's valid
+				if (newEnd > newStart && newStart < totalMessages) {
+					console.log(`[ContextManager] Using new range after deleted range: [${newStart}, ${newEnd}]`)
+					return [newStart, newEnd]
+				}
+
+				// If we can't find a valid range after deleted range, use original end
+				console.log(`[ContextManager] Using original range despite deleted range: [${start}, ${end}]`)
+				return [start, end]
+			}
+
+			end = adjustedEnd
 		}
 
 		return [start, end]
@@ -212,9 +256,13 @@ export class ContextManager {
 		deletedRange: [number, number] | undefined,
 	): Promise<OptimizationResult> {
 		const analysis = this.analyzeConversation(history)
+		console.log(
+			`[ContextManager] Starting optimization with ${history.length} messages, utilization: ${Math.round(analysis.utilizationPercentage * 100)}%`,
+		)
 
 		// If summarization not needed, do nothing
 		if (!analysis.needsSummarization) {
+			console.log(`[ContextManager] Summarization not needed, skipping`)
 			return {
 				history,
 				deletedRange,
@@ -224,11 +272,15 @@ export class ContextManager {
 
 		// Determine strategy and message range
 		const strategy = this.getSummarizationStrategy(analysis.utilizationPercentage)
+		console.log(`[ContextManager] Using ${strategy} summarization strategy`)
+
 		const [start, end] = this.getMessageRange(history, deletedRange, strategy)
+		console.log(`[ContextManager] Message range to summarize: [${start}, ${end}]`)
 
 		// Generate summary of messages to be replaced
 		const messagesToSummarize = history.slice(start, end + 1)
 		if (messagesToSummarize.length === 0) {
+			console.log(`[ContextManager] No messages to summarize, skipping`)
 			return {
 				history,
 				deletedRange,
@@ -236,6 +288,7 @@ export class ContextManager {
 			}
 		}
 
+		console.log(`[ContextManager] Summarizing ${messagesToSummarize.length} messages`)
 		const summary = await this.createSummary(api, messagesToSummarize)
 
 		// Create new history with summary
@@ -250,6 +303,10 @@ export class ContextManager {
 		const newDeletedRange = deletedRange
 			? ([Math.min(start, deletedRange[0]), Math.max(end, deletedRange[1])] as [number, number])
 			: ([start, end] as [number, number])
+
+		console.log(
+			`[ContextManager] Summarization complete. New history has ${newHistory.length} messages (reduced from ${history.length})`,
+		)
 
 		return {
 			history: newHistory,
