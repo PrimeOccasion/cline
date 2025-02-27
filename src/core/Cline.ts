@@ -10,6 +10,7 @@ import { serializeError } from "serialize-error"
 import * as vscode from "vscode"
 import { ApiHandler, buildApiHandler } from "../api"
 import { OpenAiHandler } from "../api/providers/openai"
+import { BatchFileOperations } from "./batch-file-operations";
 import { OpenRouterHandler } from "../api/providers/openrouter"
 import { ApiStream } from "../api/transform/stream"
 import CheckpointTracker from "../integrations/checkpoints/CheckpointTracker"
@@ -19,6 +20,7 @@ import { extractTextFromFile } from "../integrations/misc/extract-text"
 import { showSystemNotification } from "../integrations/notifications"
 import { TerminalManager } from "../integrations/terminal/TerminalManager"
 import { BrowserSession } from "../services/browser/BrowserSession"
+import { ContextManager } from "../core/context-manager"
 import { UrlContentFetcher } from "../services/browser/UrlContentFetcher"
 import { listFiles } from "../services/glob/list-files"
 import { regexSearchFiles } from "../services/ripgrep"
@@ -70,6 +72,8 @@ type UserContent = Array<
 export class Cline {
 	readonly taskId: string
 	api: ApiHandler
+	private contextManager: ContextManager
+	private fileOps: BatchFileOperations
 	private terminalManager: TerminalManager
 	private urlContentFetcher: UrlContentFetcher
 	browserSession: BrowserSession
@@ -124,12 +128,17 @@ export class Cline {
 		images?: string[],
 		historyItem?: HistoryItem,
 	) {
+		this.fileOps = new BatchFileOperations(cwd);
 		this.clineIgnoreController = new ClineIgnoreController(cwd)
 		this.clineIgnoreController.initialize().catch((error) => {
 			console.error("Failed to initialize ClineIgnoreController:", error)
 		})
 		this.providerRef = new WeakRef(provider)
 		this.api = buildApiHandler(apiConfiguration)
+		this.contextManager = new ContextManager(
+			this.api.getModel().id,
+			this.api.getModel().info.contextWindow || 128000
+		  );
 		this.terminalManager = new TerminalManager()
 		this.urlContentFetcher = new UrlContentFetcher(provider.context)
 		this.browserSession = new BrowserSession(provider.context, browserSettings)
@@ -760,67 +769,6 @@ export class Cline {
 		}
 	}
 
-	// Task lifecycle
-	private async createContextSummary(messagesToSummarize: Anthropic.MessageParam[]): Promise<string> {
-		try {
-			// Create a system prompt specifically for summarization
-			const summarySystemPrompt =
-				"You are an expert assistant tasked with summarizing previous conversation context. Create a detailed summary that preserves all critical information including: 1) Key decisions and their rationale, 2) Critical code snippets and file paths, 3) Important problem-solving approaches, 4) Unresolved issues, and 5) Actions taken. This summary will be used to maintain context in an ongoing technical conversation."
-
-			// Format the conversation to be summarized
-			const conversationText = messagesToSummarize
-				.map((msg) => {
-					const role = msg.role.toUpperCase()
-					const content = Array.isArray(msg.content)
-						? msg.content
-								.map((block) => {
-									if (block.type === "text") {
-										return block.text
-									}
-									if (block.type === "tool_use") {
-										return `[Used tool: ${block.name}]`
-									}
-									if (block.type === "tool_result") {
-										return `[Tool result]`
-									}
-									return ""
-								})
-								.join("\n")
-						: msg.content
-					return `${role}: ${content}\n\n`
-				})
-				.join("")
-
-			// This uses the existing createMessage method but captures the entire output rather than streaming it
-			// We'll use a simple stream collecting approach
-			const stream = this.api.createMessage(summarySystemPrompt, [
-				{
-					role: "user",
-					content: [
-						{
-							type: "text",
-							text: `Please summarize the following conversation, focusing on preserving all technical details, decisions, code changes, and progress:\n\n${conversationText}`,
-						},
-					],
-				},
-			])
-
-			// Collect all the output from the stream
-			let summary = ""
-			for await (const chunk of stream) {
-				if (chunk.type === "text") {
-					summary += chunk.text
-				}
-			}
-
-			// Add a clear header to the summary
-			return "## CONTEXT SUMMARY\n\n" + summary
-		} catch (error) {
-			console.error("Failed to create context summary:", error)
-			return "## CONTEXT SUMMARY\n\nPrevious conversation included technical discussions, code edits, and task progress that has been summarized due to context limitations."
-		}
-	}
-
 	private async startTask(task?: string, images?: string[]): Promise<void> {
 		// conversationHistory (for API) and clineMessages (for webview) need to be in sync
 		// if the extension process were killed, then on restart the clineMessages might not be empty, so we need to set it to [] when we create a new Cline client (otherwise webview would show stale messages from previous session)
@@ -1132,8 +1080,24 @@ export class Cline {
 		this.clineIgnoreController.dispose()
 		await this.diffViewProvider.revertChanges() // need to await for when we want to make sure directories/files are reverted before re-starting the task from a checkpoint
 	}
-
-	// Checkpoints
+	/**
+	 * Monitors the conversation context length and returns details
+	 */
+	private contextCounter(): { 
+		current: number, 
+		limit: number, 
+		percentage: number 
+	} {
+		// Use the context manager to analyze conversation
+		const analysis = this.contextManager.analyzeConversation(this.apiConversationHistory);
+		
+		return {
+		current: analysis.totalTokens,
+		limit: this.api.getModel().info.contextWindow || 128000,
+		percentage: analysis.utilizationPercentage
+		};
+	}
+		// Checkpoints
 
 	async saveCheckpoint(isAttemptCompletionMessage: boolean = false) {
 		const commitHash = await this.checkpointTracker?.commit() // silently fails for now
@@ -1381,68 +1345,27 @@ export class Cline {
 		if (previousApiReqIndex >= 0) {
 			const previousRequest = this.clineMessages[previousApiReqIndex]
 			if (previousRequest && previousRequest.text) {
-				const { tokensIn, tokensOut, cacheWrites, cacheReads }: ClineApiReqInfo = JSON.parse(previousRequest.text)
-				const totalTokens = (tokensIn || 0) + (tokensOut || 0) + (cacheWrites || 0) + (cacheReads || 0)
-				let contextWindow = this.api.getModel().info.contextWindow || 128_000
-				if (this.api instanceof OpenAiHandler && this.api.getModel().id.toLowerCase().includes("deepseek")) {
-					contextWindow = 64_000
-				}
-				let maxAllowedSize: number
-				switch (contextWindow) {
-					case 64_000: // deepseek models
-						maxAllowedSize = contextWindow - 27_000
-						break
-					case 128_000: // most models
-						maxAllowedSize = contextWindow - 30_000
-						break
-					case 200_000: // claude models
-						maxAllowedSize = contextWindow - 40_000
-						break
-					default:
-						maxAllowedSize = Math.max(contextWindow - 40_000, contextWindow * 0.8)
-				}
-
-				// When approaching context limits, summarize older parts of the conversation
-				if (totalTokens >= maxAllowedSize * 0.5) {
-					// Determine which messages would be truncated under the old system
-					const keep = totalTokens / 2 > maxAllowedSize ? "quarter" : "half"
-					const [start, end] = getNextTruncationRange(
-						this.apiConversationHistory,
-						this.conversationHistoryDeletedRange,
-						keep,
-					)
-
-					// Generate a summary of the messages that would be truncated
-					const messagesToSummarize = this.apiConversationHistory.slice(start, end + 1)
-					const summary = await this.createContextSummary(messagesToSummarize)
-
-					// Create a new conversation history with the summary replacing old messages
-					// Keep the first message (task)
-					const taskMessage = this.apiConversationHistory[0]
-					// Create a message with the summary
-					const summaryMessage: Anthropic.MessageParam = {
-						role: "assistant",
-						content: [
-							{
-								type: "text",
-								text: summary,
-							},
-						],
-					}
-					// Keep the more recent messages
-					const recentMessages = this.apiConversationHistory.slice(end + 1)
-
-					// Replace the conversation history
-					this.apiConversationHistory = [taskMessage, summaryMessage, ...recentMessages]
-
-					// Update the deleted range
-					this.conversationHistoryDeletedRange = [start, end]
-					await this.saveClineMessages()
-
-					console.log(`Summarized ${end - start + 1} messages to maintain context window`)
-				}
+			  // Extract token usage from previous request
+			  const { tokensIn, tokensOut, cacheWrites, cacheReads }: ClineApiReqInfo = JSON.parse(previousRequest.text)
+			  
+			  // Use the context manager to optimize history
+			  const { history: optimizedHistory, deletedRange: newDeletedRange, didSummarize, messagesReplaced } = 
+				await this.contextManager.optimizeConversationHistory(
+				  this.api,
+				  this.apiConversationHistory,
+				  this.conversationHistoryDeletedRange
+				)
+		  
+			  if (didSummarize) {
+				// Update conversation history with optimized version
+				this.apiConversationHistory = optimizedHistory
+				this.conversationHistoryDeletedRange = newDeletedRange
+				await this.saveClineMessages()
+		  
+				console.log(`Summarized ${messagesReplaced} messages to maintain context window`)
+			  }
 			}
-		}
+		  }
 
 		// Use the conversation history that may now include summaries
 		const conversationHistory = this.apiConversationHistory
@@ -1767,8 +1690,7 @@ export class Cline {
 						if (this.diffViewProvider.editType !== undefined) {
 							fileExists = this.diffViewProvider.editType === "modify"
 						} else {
-							const absolutePath = path.resolve(cwd, relPath)
-							fileExists = await fileExistsAtPath(absolutePath)
+							fileExists = await this.fileOps.fileExists(relPath)
 							this.diffViewProvider.editType = fileExists ? "modify" : "create"
 						}
 
@@ -2067,7 +1989,7 @@ export class Cline {
 									}
 								}
 								// now execute the tool like normal
-								const content = await extractTextFromFile(absolutePath)
+								const content = await this.fileOps.readFile(relPath)
 								pushToolResult(content)
 
 								break
@@ -3162,7 +3084,18 @@ export class Cline {
 		} satisfies ClineApiReqInfo)
 		await this.saveClineMessages()
 		await this.providerRef.deref()?.postStateToWebview()
-
+		const contextStats = this.contextCounter();
+		if (contextStats.percentage > 0.3) {
+		// Notify when context is filling up
+		await this.say(
+			"context_info", 
+			JSON.stringify({
+			usage: `${Math.round(contextStats.percentage * 100)}%`,
+			tokens: contextStats.current,
+			limit: contextStats.limit
+			})
+		);
+		}
 		try {
 			let cacheWriteTokens = 0
 			let cacheReadTokens = 0

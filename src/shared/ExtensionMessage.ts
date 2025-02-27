@@ -140,6 +140,7 @@ export type ClineSay =
 	| "deleted_api_reqs"
 	| "clineignore_error"
 	| "checkpoint_created"
+	| "context_info"
 
 export interface ClineSayTool {
 	tool:
