@@ -10,7 +10,7 @@ import { serializeError } from "serialize-error"
 import * as vscode from "vscode"
 import { ApiHandler, buildApiHandler } from "../api"
 import { OpenAiHandler } from "../api/providers/openai"
-import { BatchFileOperations } from "./batch-file-operations";
+import { BatchFileOperations } from "./batch-file-operations"
 import { OpenRouterHandler } from "../api/providers/openrouter"
 import { ApiStream } from "../api/transform/stream"
 import CheckpointTracker from "../integrations/checkpoints/CheckpointTracker"
@@ -128,17 +128,14 @@ export class Cline {
 		images?: string[],
 		historyItem?: HistoryItem,
 	) {
-		this.fileOps = new BatchFileOperations(cwd);
+		this.fileOps = new BatchFileOperations(cwd)
 		this.clineIgnoreController = new ClineIgnoreController(cwd)
 		this.clineIgnoreController.initialize().catch((error) => {
 			console.error("Failed to initialize ClineIgnoreController:", error)
 		})
 		this.providerRef = new WeakRef(provider)
 		this.api = buildApiHandler(apiConfiguration)
-		this.contextManager = new ContextManager(
-			this.api.getModel().id,
-			this.api.getModel().info.contextWindow || 128000
-		  );
+		this.contextManager = new ContextManager(this.api.getModel().id, this.api.getModel().info.contextWindow || 128000)
 		this.terminalManager = new TerminalManager()
 		this.urlContentFetcher = new UrlContentFetcher(provider.context)
 		this.browserSession = new BrowserSession(provider.context, browserSettings)
@@ -1083,21 +1080,21 @@ export class Cline {
 	/**
 	 * Monitors the conversation context length and returns details
 	 */
-	private contextCounter(): { 
-		current: number, 
-		limit: number, 
-		percentage: number 
+	private contextCounter(): {
+		current: number
+		limit: number
+		percentage: number
 	} {
 		// Use the context manager to analyze conversation
-		const analysis = this.contextManager.analyzeConversation(this.apiConversationHistory);
-		
+		const analysis = this.contextManager.analyzeConversation(this.apiConversationHistory)
+
 		return {
-		current: analysis.totalTokens,
-		limit: this.api.getModel().info.contextWindow || 128000,
-		percentage: analysis.utilizationPercentage
-		};
+			current: analysis.totalTokens,
+			limit: this.api.getModel().info.contextWindow || 128000,
+			percentage: analysis.utilizationPercentage,
+		}
 	}
-		// Checkpoints
+	// Checkpoints
 
 	async saveCheckpoint(isAttemptCompletionMessage: boolean = false) {
 		const commitHash = await this.checkpointTracker?.commit() // silently fails for now
@@ -1345,27 +1342,31 @@ export class Cline {
 		if (previousApiReqIndex >= 0) {
 			const previousRequest = this.clineMessages[previousApiReqIndex]
 			if (previousRequest && previousRequest.text) {
-			  // Extract token usage from previous request
-			  const { tokensIn, tokensOut, cacheWrites, cacheReads }: ClineApiReqInfo = JSON.parse(previousRequest.text)
-			  
-			  // Use the context manager to optimize history
-			  const { history: optimizedHistory, deletedRange: newDeletedRange, didSummarize, messagesReplaced } = 
-				await this.contextManager.optimizeConversationHistory(
-				  this.api,
-				  this.apiConversationHistory,
-				  this.conversationHistoryDeletedRange
+				// Extract token usage from previous request
+				const { tokensIn, tokensOut, cacheWrites, cacheReads }: ClineApiReqInfo = JSON.parse(previousRequest.text)
+
+				// Use the context manager to optimize history
+				const {
+					history: optimizedHistory,
+					deletedRange: newDeletedRange,
+					didSummarize,
+					messagesReplaced,
+				} = await this.contextManager.optimizeConversationHistory(
+					this.api,
+					this.apiConversationHistory,
+					this.conversationHistoryDeletedRange,
 				)
-		  
-			  if (didSummarize) {
-				// Update conversation history with optimized version
-				this.apiConversationHistory = optimizedHistory
-				this.conversationHistoryDeletedRange = newDeletedRange
-				await this.saveClineMessages()
-		  
-				console.log(`Summarized ${messagesReplaced} messages to maintain context window`)
-			  }
+
+				if (didSummarize) {
+					// Update conversation history with optimized version
+					this.apiConversationHistory = optimizedHistory
+					this.conversationHistoryDeletedRange = newDeletedRange
+					await this.saveClineMessages()
+
+					console.log(`Summarized ${messagesReplaced} messages to maintain context window`)
+				}
 			}
-		  }
+		}
 
 		// Use the conversation history that may now include summaries
 		const conversationHistory = this.apiConversationHistory
@@ -3084,17 +3085,17 @@ export class Cline {
 		} satisfies ClineApiReqInfo)
 		await this.saveClineMessages()
 		await this.providerRef.deref()?.postStateToWebview()
-		const contextStats = this.contextCounter();
+		const contextStats = this.contextCounter()
 		if (contextStats.percentage > 0.3) {
-		// Notify when context is filling up
-		await this.say(
-			"context_info", 
-			JSON.stringify({
-			usage: `${Math.round(contextStats.percentage * 100)}%`,
-			tokens: contextStats.current,
-			limit: contextStats.limit
-			})
-		);
+			// Notify when context is filling up
+			await this.say(
+				"context_info",
+				JSON.stringify({
+					usage: `${Math.round(contextStats.percentage * 100)}%`,
+					tokens: contextStats.current,
+					limit: contextStats.limit,
+				}),
+			)
 		}
 		try {
 			let cacheWriteTokens = 0

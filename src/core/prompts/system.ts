@@ -1,29 +1,32 @@
+// src/core/prompts/system.ts
+
 import { getShell } from "../../utils/shell"
 import os from "os"
 import osName from "os-name"
 import { McpHub } from "../../services/mcp/McpHub"
 import { BrowserSettings } from "../../shared/BrowserSettings"
 
-export const SYSTEM_PROMPT = async (
-	cwd: string,
-	supportsComputerUse: boolean,
-	mcpHub: McpHub,
-	browserSettings: BrowserSettings,
-) => {
-	// Get connected servers for more compact representation
-	const connectedServers = mcpHub.getServers().filter(server => server.status === "connected")
-	
-	// Build MCP section only if needed
-	const mcpSection = mcpHub.getMode() !== "off" 
-		? buildMcpSection(connectedServers, mcpHub)
-		: ""
-		
-	// Build browser section only if supported
-	const browserSection = supportsComputerUse
-		? buildBrowserSection(browserSettings)
-		: ""
-		
-	return `You are Cline, a highly skilled software engineer with extensive knowledge in programming languages, frameworks, design patterns, and best practices.
+export async function SYSTEM_PROMPT(
+  cwd: string,
+  supportsComputerUse: boolean,
+  mcpHub: McpHub,
+  browserSettings: BrowserSettings
+): Promise<string> {
+  // Get connected servers for more compact representation
+  const connectedServers = mcpHub.getServers().filter(
+    (server) => server.status === "connected"
+  )
+
+  // Build MCP section only if needed
+  const mcpSection =
+    mcpHub.getMode() !== "off" ? buildMcpSection(connectedServers, mcpHub) : ""
+
+  // Build browser section only if supported
+  const browserSection = supportsComputerUse
+    ? buildBrowserSection(browserSettings)
+    : ""
+
+  return `You are Cline, a highly skilled software engineer with extensive knowledge in programming languages, frameworks, design patterns, and best practices.
 
 === TOOL USE ===
 
@@ -44,11 +47,7 @@ You have access to tools that are executed upon user approval. Use one tool per 
 <replace_in_file>
 <path>Path relative to ${cwd.toPosix()}</path>
 <diff>
-<<<<<<< SEARCH
 [exact content to find]
-=======
-[new content to replace with]
->>>>>>> REPLACE
 </diff>
 </replace_in_file>
 
@@ -91,16 +90,22 @@ You have access to tools that are executed upon user approval. Use one tool per 
 <result>Final result description</result>
 <command>Optional command to demonstrate result</command>
 </attempt_completion>
-${supportsComputerUse ? `
-## browser_action
+
+${
+  supportsComputerUse
+    ? `## browser_action
 <browser_action>
 <action>launch/click/type/scroll_down/scroll_up/close</action>
 <url>URL for launch action</url>
 <coordinate>Coordinates for click (x,y)</coordinate>
 <text>Text for type action</text>
 </browser_action>
-` : ''}${mcpHub.getMode() !== "off" ? `
-## use_mcp_tool
+`
+    : ""
+}
+${
+  mcpHub.getMode() !== "off"
+    ? `## use_mcp_tool
 <use_mcp_tool>
 <server_name>MCP server name</server_name>
 <tool_name>Tool name</tool_name>
@@ -112,7 +117,9 @@ ${supportsComputerUse ? `
 <server_name>MCP server name</server_name>
 <uri>Resource URI</uri>
 </access_mcp_resource>
-` : ''}
+`
+    : ""
+}
 
 === CRITICAL RULES ===
 
@@ -155,7 +162,7 @@ Be aware that editor auto-formatting may modify files after edits (quotes, inden
 
 === MODES ===
 
-When in PLAN MODE: 
+When in PLAN MODE:
 - Focus on information gathering, asking questions, and architecting a solution
 - Use plan_mode_response when ready to present your plan
 - User must manually switch to ACT MODE to implement the solution
@@ -175,25 +182,27 @@ Work through user tasks methodically:
 Environment details are provided automatically at the end of each user message - use this context to better understand the project structure.`
 }
 
-// Helper functions to build sections conditionally
-
+// Helper to build MCP section
 function buildMcpSection(connectedServers: any[], mcpHub: McpHub): string {
-	if (connectedServers.length === 0) return ""
-	
-	return `
+  if (connectedServers.length === 0) return ""
+
+  return `
 === MCP SERVERS ===
 
-${connectedServers.map(server => {
-	const tools = server.tools
-		?.map((tool: any) => `- ${tool.name}: ${tool.description}`)
-		.join('\n') || 'No tools available';
-		
-	return `## ${server.name}\n${tools}`;
-}).join('\n\n')}`
+${connectedServers
+  .map((server) => {
+    const tools =
+      server.tools
+        ?.map((tool: any) => `- ${tool.name}: ${tool.description}`)
+        .join("\n") || "No tools available"
+    return `## ${server.name}\n${tools}`
+  })
+  .join("\n\n")}`
 }
 
+// Helper to build Browser section
 function buildBrowserSection(browserSettings: BrowserSettings): string {
-	return `
+  return `
 === BROWSER USAGE ===
 
 Use browser_action to interact with websites:
@@ -205,25 +214,29 @@ Use browser_action to interact with websites:
 
 Results include screenshots and console logs for analysis.`
 }
-// Add this function to system.ts
+
+/**
+ * Prepends user instructions from multiple sources (.clinerules, .clineignore, custom settings).
+ * This is optionally inserted in the system prompt.
+ */
 export function addUserInstructions(
-	settingsCustomInstructions?: string,
-	clineRulesFileInstructions?: string,
-	clineIgnoreInstructions?: string
-  ): string {
-	const parts: string[] = [];
-	
-	if (settingsCustomInstructions) {
-	  parts.push("# Custom Instructions\n\n" + settingsCustomInstructions);
-	}
-	
-	if (clineRulesFileInstructions) {
-	  parts.push(clineRulesFileInstructions);
-	}
-	
-	if (clineIgnoreInstructions) {
-	  parts.push(clineIgnoreInstructions);
-	}
-	
-	return parts.length > 0 ? parts.join("\n\n") + "\n\n" : "";
+  settingsCustomInstructions?: string,
+  clineRulesFileInstructions?: string,
+  clineIgnoreInstructions?: string
+): string {
+  const parts: string[] = []
+
+  if (settingsCustomInstructions) {
+    parts.push("# Custom Instructions\n\n" + settingsCustomInstructions)
   }
+
+  if (clineRulesFileInstructions) {
+    parts.push(clineRulesFileInstructions)
+  }
+
+  if (clineIgnoreInstructions) {
+    parts.push(clineIgnoreInstructions)
+  }
+
+  return parts.length > 0 ? parts.join("\n\n") + "\n\n" : ""
+}
