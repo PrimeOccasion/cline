@@ -39,11 +39,15 @@ Description: Write content to a file at the specified path. If the file exists, 
 </write_to_file>
 
 ## replace_in_file
-Description: Make precise replacements in an existing file. Your SEARCH block must match exactly (including whitespace, indentation, etc.).
+Description: Make precise replacements in an existing file. Format your diff with SEARCH and REPLACE blocks as shown below:
 <replace_in_file>
 <path>Path relative to ${cwd.toPosix()}</path>
 <diff>
-[exact content to find]
+<<<<<<< SEARCH
+[exact content to find in the original file]
+=======
+[content to replace with]
+>>>>>>> REPLACE
 </diff>
 </replace_in_file>
 
@@ -143,6 +147,7 @@ You are an expert assistant tasked with summarizing previous conversation contex
 5) Actions taken
 
 This summary will be used to maintain context in a technical conversation.
+
 
 === SYSTEM INFO ===
 

@@ -33,6 +33,20 @@ export function parseAssistantMessage(assistantMessage: string) {
 				continue
 			}
 
+			// Special handling for replace_in_file diff parameter
+			if (currentToolUse.name === "replace_in_file" && currentParamName === "diff") {
+				// Check if the current parameter value contains the closing tag
+				const closingTagIndex = currentParamValue.lastIndexOf(paramClosingTag)
+				if (closingTagIndex !== -1) {
+					// Extract content up to the closing tag
+					currentToolUse.params[currentParamName] = currentParamValue.slice(0, closingTagIndex).trim()
+					currentParamName = undefined
+					continue
+				}
+				// If no closing tag found, continue accumulating
+				continue
+			}
+
 			// Regular parameter handling for other tools/params
 			if (currentParamValue.endsWith(paramClosingTag)) {
 				// end of param value
@@ -80,6 +94,19 @@ export function parseAssistantMessage(assistantMessage: string) {
 					const contentEndIndex = toolContent.lastIndexOf(contentEndTag)
 					if (contentStartIndex !== -1 && contentEndIndex !== -1 && contentEndIndex > contentStartIndex) {
 						currentToolUse.params[contentParamName] = toolContent.slice(contentStartIndex, contentEndIndex).trim()
+					}
+				}
+
+				// Similar fallback for replace_in_file diff parameter
+				const diffParamName: ToolParamName = "diff"
+				if (currentToolUse.name === "replace_in_file" && accumulator.endsWith(`</${diffParamName}>`)) {
+					const toolContent = accumulator.slice(currentToolUseStartIndex)
+					const diffStartTag = `<${diffParamName}>`
+					const diffEndTag = `</${diffParamName}>`
+					const diffStartIndex = toolContent.indexOf(diffStartTag) + diffStartTag.length
+					const diffEndIndex = toolContent.lastIndexOf(diffEndTag)
+					if (diffStartIndex !== -1 && diffEndIndex !== -1 && diffEndIndex > diffStartIndex) {
+						currentToolUse.params[diffParamName] = toolContent.slice(diffStartIndex, diffEndIndex).trim()
 					}
 				}
 

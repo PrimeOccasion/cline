@@ -3085,7 +3085,51 @@ export class Cline {
 		await this.providerRef.deref()?.postStateToWebview()
 		const contextStats = this.contextCounter()
 		if (contextStats.percentage > 0.3) {
-			// Notify when context is filling up
+			// Check if memory optimization is needed before sending context info
+			try {
+				// Use the context manager to analyze conversation and determine if memory refresh is needed
+				const analysis = this.contextManager.analyzeConversation(this.apiConversationHistory)
+
+				// If memory refresh is needed, perform it and include details in context_info
+				if (analysis.needsSummarization) {
+					// Perform memory optimization
+					const optimizationResult = await this.contextManager.optimizeConversationHistory(
+						this.api,
+						this.apiConversationHistory,
+						this.conversationHistoryDeletedRange,
+					)
+
+					if (optimizationResult.didSummarize) {
+						// Create enhanced context_info message with memory management details
+						await this.say(
+							"context_info",
+							JSON.stringify({
+								usage: `${Math.round(contextStats.percentage * 100)}%`,
+								tokens: contextStats.current,
+								limit: contextStats.limit,
+								memoryRefresh: true,
+								messagesReplaced: optimizationResult.messagesReplaced ?? 0,
+								tokensBefore: optimizationResult.tokensBefore ?? 0,
+								tokensAfter: optimizationResult.tokensAfter ?? 0,
+								tokensSaved: (optimizationResult.tokensBefore ?? 0) - (optimizationResult.tokensAfter ?? 0),
+								summaryBrief: optimizationResult.summaryBrief ?? "Memory optimized",
+							}),
+						)
+
+						// Update conversation history with optimized version
+						this.apiConversationHistory = optimizationResult.history
+						this.conversationHistoryDeletedRange = optimizationResult.deletedRange
+						await this.saveClineMessages()
+
+						console.log(`Summarized ${optimizationResult.messagesReplaced ?? 0} messages to maintain context window`)
+						return true // Skip the standard context_info message and indicate success
+					}
+				}
+			} catch (error) {
+				console.error("Failed to optimize conversation history:", error)
+			}
+
+			// Send standard context_info message if no optimization occurred
 			await this.say(
 				"context_info",
 				JSON.stringify({
