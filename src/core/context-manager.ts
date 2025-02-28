@@ -39,9 +39,9 @@ export class ContextManager {
 		this.model = model
 		this.maxContextLength = maxContextLength || 128000
 
-		// Thresholds for memory refresh
-		this.memoryThreshold = 0.7 // Start memory refresh at 70% (earlier than before)
-		this.emergencyThreshold = 0.9 // Emergency mode at 90%
+		// Lower thresholds to trigger memory refresh earlier
+		this.memoryThreshold = 0.4 // Changed from 0.7 to 0.4
+		this.emergencyThreshold = 0.6 // Changed from 0.9 to 0.6
 	}
 
 	/**
@@ -98,8 +98,15 @@ export class ContextManager {
 		// Memory refresh needed?
 		let needsSummarization = false
 
+		// Add a hard token limit
+		const hardTokenLimit = 60000 // About half of typical context window
+
+		// Force summarization if we exceed the hard token limit
+		if (totalTokens > hardTokenLimit) {
+			needsSummarization = true
+		}
 		// If this is the first refresh, use the standard threshold
-		if (this.memoryRefreshCount === 0) {
+		else if (this.memoryRefreshCount === 0) {
 			needsSummarization = utilizationPercentage >= this.memoryThreshold
 		}
 		// For subsequent refreshes, check token growth since last refresh
