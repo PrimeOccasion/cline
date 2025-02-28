@@ -39,9 +39,9 @@ export class ContextManager {
 		this.model = model
 		this.maxContextLength = maxContextLength || 128000
 
-		// Lower thresholds to trigger memory refresh earlier
-		this.memoryThreshold = 0.4 // Changed from 0.7 to 0.4
-		this.emergencyThreshold = 0.6 // Changed from 0.9 to 0.6
+		// Set thresholds for memory refresh
+		this.memoryThreshold = 0.6 // Standard threshold at 60%
+		this.emergencyThreshold = 0.8 // Emergency threshold at 80%
 	}
 
 	/**
@@ -186,7 +186,17 @@ Conversation spans from message 0 to ${messageCount - 1}`
 	 */
 	private createMemoryDecisionPrompt(messages: Anthropic.MessageParam[], strategy: MemoryStrategy): string {
 		const totalMessages = messages.length
-		const tokenEstimates = messages.map((msg, i) => `Message ${i}: ${this.estimateTokenCount(msg)} tokens`)
+
+		// Calculate token statistics instead of listing every message
+		const totalTokens = messages.reduce((sum, msg) => sum + this.estimateTokenCount(msg), 0)
+		const avgTokens = Math.round(totalTokens / totalMessages)
+
+		// Find largest messages (top 5)
+		const largestMessages = messages
+			.map((msg, i) => ({ index: i, tokens: this.estimateTokenCount(msg) }))
+			.sort((a, b) => b.tokens - a.tokens)
+			.slice(0, 5)
+			.map((item) => `Message ${item.index}: ${item.tokens} tokens`)
 
 		let strategyInstructions = ""
 		switch (strategy) {
@@ -213,8 +223,11 @@ ${strategyInstructions}
 CONVERSATION SUMMARY:
 ${this.createBriefConversationSummary(messages)}
 
-TOKEN ESTIMATES:
-${tokenEstimates.join("\n")}
+TOKEN STATISTICS:
+- Total tokens: ${totalTokens}
+- Average per message: ${avgTokens}
+- Largest messages:
+${largestMessages.join("\n")}
 
 Your task is to decide which messages should be kept verbatim and which should be summarized to optimize memory usage.
 
@@ -267,23 +280,82 @@ SUMMARY_INSTRUCTIONS: Your specific instructions for summarization`
 	}
 
 	/**
+	 * Summarizes a long message using an additional LLM call
+	 */
+	private async summarizeLongMessage(api: ApiHandler, message: string): Promise<string> {
+		const prompt = `Summarize this long technical message while preserving all:
+1) Code snippets (exact syntax)
+2) File paths and technical identifiers
+3) Command examples
+4) Key technical decisions
+
+Your summary should be about 30-40% of the original length while maintaining all critical technical information.
+
+MESSAGE:
+${message}`
+
+		const stream = api.createMessage("You are an AI assistant summarizing a technical message.", [
+			{ role: "user", content: [{ type: "text", text: prompt }] },
+		])
+
+		let summary = ""
+		for await (const chunk of stream) {
+			if (chunk.type === "text") {
+				summary += chunk.text
+			}
+		}
+
+		return `[SUMMARIZED LONG MESSAGE: ${summary}]`
+	}
+
+	/**
 	 * Creates a memory structure prompt for the LLM
 	 */
-	private createMemoryStructurePrompt(messagesToSummarize: Anthropic.MessageParam[], summaryInstructions: string): string {
-		const conversationContent = messagesToSummarize
-			.map((msg, i) => {
+	private async createMemoryStructurePrompt(
+		api: ApiHandler,
+		messagesToSummarize: Anthropic.MessageParam[],
+		summaryInstructions: string,
+	): Promise<string> {
+		// Process messages - summarize very long messages with an LLM call instead of truncating
+		const MAX_TEXT_LENGTH = 1000 // Threshold for long text blocks
+		const conversationContent = await Promise.all(
+			messagesToSummarize.map(async (msg, i) => {
 				const role = msg.role.toUpperCase()
-				const content = Array.isArray(msg.content)
-					? msg.content
-							.map((block) => {
-								if (block.type === "text") return block.text
-								return `[${block.type} content]`
-							})
-							.join("\n")
-					: msg.content
+				let content = ""
+
+				if (Array.isArray(msg.content)) {
+					const contentBlocks = await Promise.all(
+						msg.content.map(async (block) => {
+							if (block.type === "text") {
+								const text = block.text
+								// Use LLM to summarize very long text blocks instead of truncating
+								if (text.length > MAX_TEXT_LENGTH) {
+									return await this.summarizeLongMessage(api, text)
+								}
+								return text
+							} else if (block.type === "tool_use") {
+								return `[TOOL: ${(block as any).name || "unknown"} with parameters]`
+							} else if (block.type === "tool_result") {
+								return `[TOOL RESULT: ${(block as any).tool_use_id || "unknown"}]`
+							}
+							return `[${block.type} content]`
+						}),
+					)
+					content = contentBlocks.join("\n")
+				} else if (typeof msg.content === "string") {
+					// Use LLM to summarize very long string content
+					if (msg.content.length > MAX_TEXT_LENGTH) {
+						content = await this.summarizeLongMessage(api, msg.content)
+					} else {
+						content = msg.content
+					}
+				}
+
 				return `MESSAGE ${i} (${role}):\n${content}\n`
-			})
-			.join("\n---\n")
+			}),
+		)
+
+		const formattedContent = conversationContent.join("\n---\n")
 
 		return `You are creating a memory structure to replace ${messagesToSummarize.length} messages in an ongoing technical conversation.
 
@@ -293,11 +365,12 @@ ${summaryInstructions}
 MESSAGES TO SUMMARIZE:
 ${conversationContent}
 
-Create a comprehensive, structured memory summary that:
-1. Preserves all critical information from these messages
-2. Maintains awareness of key decisions, code snippets, and technical details
-3. Organizes information in a clear, structured format
-4. Is concise enough to save tokens while preserving context
+Create a structured memory summary that:
+1. Preserves critical information: code snippets, file paths, technical decisions, and key context
+2. Uses a concise, hierarchical format with clear sections
+3. Prioritizes technical details over general discussion
+4. Omits redundant information and pleasantries
+5. Is optimized for token efficiency while maintaining all essential context
 
 Your summary will replace these messages in the conversation history, so it must maintain perfect continuity.`
 	}
@@ -352,9 +425,11 @@ Your summary will replace these messages in the conversation history, so it must
 
 		// STEP 2: Create memory structure based on the LLM's decision
 		const messagesToSummarize = history.filter((_, index) => !messagesToKeepIndices.includes(index))
-		const memoryStructurePrompt = this.createMemoryStructurePrompt(messagesToSummarize, summaryInstructions)
 
+		// Now pass the API to the createMemoryStructurePrompt method
 		console.log(`[ContextManager] Requesting memory structure from LLM for ${messagesToSummarize.length} messages`)
+		const memoryStructurePrompt = await this.createMemoryStructurePrompt(api, messagesToSummarize, summaryInstructions)
+
 		const memoryStructureStream = api.createMessage(
 			"You are an AI assistant organizing your memory of a technical conversation.",
 			[{ role: "user", content: [{ type: "text", text: memoryStructurePrompt }] }],

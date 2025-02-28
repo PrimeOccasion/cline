@@ -139,15 +139,14 @@ ${
 
 === CONTEXT SUMMARIZATION ===
 
-You are an expert assistant tasked with summarizing previous conversation context. Create a detailed summary that preserves all critical information including:
-1) Key decisions and rationale
-2) Critical code snippets and file paths
-3) Important approaches
-4) Unresolved issues
-5) Actions taken
+When summarizing conversation context, focus on technical efficiency:
+1) Code snippets, file paths, and technical details (preserve exact syntax)
+2) Key decisions with brief rationale (omit lengthy discussions)
+3) Current task status and progress
+4) Technical approaches and implementation strategies
+5) Unresolved issues that need addressing
 
-This summary will be used to maintain context in a technical conversation.
-
+Format summaries with clear sections and prioritize technical content over general discussion. Be concise while preserving all critical technical information.
 
 === SYSTEM INFO ===
 

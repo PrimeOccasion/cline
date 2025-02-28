@@ -3119,10 +3119,13 @@ export class Cline {
 						// Update conversation history with optimized version
 						this.apiConversationHistory = optimizationResult.history
 						this.conversationHistoryDeletedRange = optimizationResult.deletedRange
+						await this.saveApiConversationHistory()
 						await this.saveClineMessages()
 
 						console.log(`Summarized ${optimizationResult.messagesReplaced ?? 0} messages to maintain context window`)
-						return true // Skip the standard context_info message and indicate success
+
+						// Continue execution - do not return or break here
+						// This ensures the API request proceeds after memory optimization
 					}
 				}
 			} catch (error) {
