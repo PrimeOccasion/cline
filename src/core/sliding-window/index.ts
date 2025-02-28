@@ -123,22 +123,20 @@ function isTaskDefinition(content: string): boolean {
 }
 
 /**
- * No longer truncates messages, instead appends memory structure messages
+ * Returns messages with proper handling of deleted ranges
  * @param messages - The full conversation history
- * @param deletedRange - Unused parameter kept for compatibility
- * @param memoryStructure - Optional memory structure to add
- * @returns Original messages with memory structure appended
+ * @param deletedRange - Range of messages that have been replaced with a summary
+ * @returns Messages with proper handling of deleted ranges
  */
 export function getTruncatedMessages(
 	messages: Anthropic.MessageParam[],
 	deletedRange?: [number, number],
-	memoryStructure?: Anthropic.MessageParam,
 ): Anthropic.MessageParam[] {
-	// No truncation - if we have a memory structure, append it
-	if (memoryStructure) {
-		return [...messages, memoryStructure]
+	if (!deletedRange) {
+		return messages
 	}
 
-	// Otherwise return the original messages unchanged
+	// If we have a deleted range, it means some messages have been replaced with a summary
+	// The summary is the first message, followed by the kept messages
 	return messages
 }

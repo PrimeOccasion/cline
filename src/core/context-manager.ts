@@ -16,6 +16,9 @@ interface OptimizationResult {
 	deletedRange: [number, number] | undefined
 	didSummarize: boolean
 	messagesReplaced?: number
+	tokensBefore?: number
+	tokensAfter?: number
+	summaryBrief?: string
 }
 
 // Define memory refresh strategies
@@ -141,7 +144,263 @@ export class ContextManager {
 	}
 
 	/**
-	 * Creates a memory structure for the conversation using the LLM
+	 * Creates a brief conversation summary for memory decision making
+	 */
+	private createBriefConversationSummary(messages: Anthropic.MessageParam[]): string {
+		// Create a very brief summary of the conversation to help the LLM understand the context
+		// This is just for the decision-making process, not the actual memory structure
+
+		const taskMessage = messages.find(
+			(msg) =>
+				msg.role === "user" &&
+				(Array.isArray(msg.content)
+					? msg.content.some((block) => block.type === "text" && block.text.includes("<task>"))
+					: typeof msg.content === "string" && msg.content.includes("<task>")),
+		)
+
+		const taskDescription = taskMessage
+			? "Task: " +
+				(Array.isArray(taskMessage.content)
+					? taskMessage.content.find((block) => block.type === "text")?.text.replace(/<\/?task>/g, "") || "Unknown"
+					: taskMessage.content.replace(/<\/?task>/g, ""))
+			: "No explicit task found"
+
+		const messageCount = messages.length
+		const userMessages = messages.filter((msg) => msg.role === "user").length
+		const assistantMessages = messages.filter((msg) => msg.role === "assistant").length
+
+		return `${taskDescription}
+Total messages: ${messageCount} (${userMessages} user, ${assistantMessages} assistant)
+Conversation spans from message 0 to ${messageCount - 1}`
+	}
+
+	/**
+	 * Creates a memory decision prompt for the LLM
+	 */
+	private createMemoryDecisionPrompt(messages: Anthropic.MessageParam[], strategy: MemoryStrategy): string {
+		const totalMessages = messages.length
+		const tokenEstimates = messages.map((msg, i) => `Message ${i}: ${this.estimateTokenCount(msg)} tokens`)
+
+		let strategyInstructions = ""
+		switch (strategy) {
+			case "emergency":
+				strategyInstructions =
+					"EMERGENCY context situation. Be extremely aggressive in summarization. Keep only the most recent and critical messages."
+				break
+			case "aggressive":
+				strategyInstructions = "Token usage is high. Be aggressive in summarization while preserving key context."
+				break
+			case "standard":
+				strategyInstructions =
+					"Create a balanced memory structure that preserves important context while reducing token usage."
+				break
+			case "light":
+				strategyInstructions = "Light optimization needed. Focus on summarizing older, less relevant messages."
+				break
+		}
+
+		return `You are managing the memory of an ongoing technical conversation with ${totalMessages} messages.
+
+${strategyInstructions}
+
+CONVERSATION SUMMARY:
+${this.createBriefConversationSummary(messages)}
+
+TOKEN ESTIMATES:
+${tokenEstimates.join("\n")}
+
+Your task is to decide which messages should be kept verbatim and which should be summarized to optimize memory usage.
+
+Please analyze the conversation and provide:
+1. INDICES_TO_KEEP: A JSON array of message indices that should be kept verbatim (e.g., [10, 11, 12, 15, 16, 17, 18, 19])
+2. SUMMARY_INSTRUCTIONS: Specific instructions for how to summarize the removed messages
+
+Guidelines:
+- Always keep the most recent messages (recency is important)
+- Preserve messages containing critical decisions, code snippets, or technical details
+- Consider summarizing explanations, discussions, and context-setting messages
+- Balance token reduction with context preservation
+
+Respond in this exact format:
+INDICES_TO_KEEP: [array of indices]
+SUMMARY_INSTRUCTIONS: Your specific instructions for summarization`
+	}
+
+	/**
+	 * Parses the memory decision from the LLM
+	 */
+	private parseMemoryDecision(decisionText: string): {
+		messagesToKeepIndices: number[]
+		summaryInstructions: string
+	} {
+		// Default values in case parsing fails
+		let messagesToKeepIndices: number[] = []
+		let summaryInstructions = "Create a comprehensive summary of the removed messages."
+
+		try {
+			// Extract indices to keep
+			const indicesMatch = decisionText.match(/INDICES_TO_KEEP:\s*(\[[\d,\s]*\])/i)
+			if (indicesMatch && indicesMatch[1]) {
+				messagesToKeepIndices = JSON.parse(indicesMatch[1])
+			}
+
+			// Extract summary instructions
+			const instructionsMatch = decisionText.match(/SUMMARY_INSTRUCTIONS:\s*([\s\S]*?)(?:$|INDICES_TO_KEEP)/i)
+			if (instructionsMatch && instructionsMatch[1]) {
+				summaryInstructions = instructionsMatch[1].trim()
+			}
+		} catch (error) {
+			console.error("Failed to parse memory decision:", error)
+			// Fall back to keeping the most recent 10 messages
+			const totalMessages = 10
+			messagesToKeepIndices = Array.from({ length: totalMessages }, (_, i) => i)
+		}
+
+		return { messagesToKeepIndices, summaryInstructions }
+	}
+
+	/**
+	 * Creates a memory structure prompt for the LLM
+	 */
+	private createMemoryStructurePrompt(messagesToSummarize: Anthropic.MessageParam[], summaryInstructions: string): string {
+		const conversationContent = messagesToSummarize
+			.map((msg, i) => {
+				const role = msg.role.toUpperCase()
+				const content = Array.isArray(msg.content)
+					? msg.content
+							.map((block) => {
+								if (block.type === "text") return block.text
+								return `[${block.type} content]`
+							})
+							.join("\n")
+					: msg.content
+				return `MESSAGE ${i} (${role}):\n${content}\n`
+			})
+			.join("\n---\n")
+
+		return `You are creating a memory structure to replace ${messagesToSummarize.length} messages in an ongoing technical conversation.
+
+SUMMARY INSTRUCTIONS:
+${summaryInstructions}
+
+MESSAGES TO SUMMARIZE:
+${conversationContent}
+
+Create a comprehensive, structured memory summary that:
+1. Preserves all critical information from these messages
+2. Maintains awareness of key decisions, code snippets, and technical details
+3. Organizes information in a clear, structured format
+4. Is concise enough to save tokens while preserving context
+
+Your summary will replace these messages in the conversation history, so it must maintain perfect continuity.`
+	}
+
+	/**
+	 * Optimize conversation history using LLM memory management
+	 * This implementation actually replaces messages with a summary instead of just appending
+	 */
+	public async optimizeConversationHistory(
+		api: ApiHandler,
+		history: Anthropic.MessageParam[],
+		deletedRange: [number, number] | undefined,
+	): Promise<OptimizationResult> {
+		// Analyze conversation to determine if memory refresh is needed
+		const analysis = this.analyzeConversation(history)
+		console.log(
+			`[ContextManager] Starting memory optimization with ${history.length} messages, utilization: ${Math.round(analysis.utilizationPercentage * 100)}%`,
+		)
+
+		// If memory refresh not needed, return unchanged
+		if (!analysis.needsSummarization) {
+			console.log(`[ContextManager] Memory refresh not needed, skipping`)
+			return {
+				history,
+				deletedRange: undefined,
+				didSummarize: false,
+			}
+		}
+
+		// Determine memory strategy based on current token usage
+		const strategy = this.getMemoryStrategy(analysis.utilizationPercentage)
+		console.log(`[ContextManager] Using ${strategy} memory strategy for ${analysis.totalTokens} tokens`)
+
+		// STEP 1: Ask the LLM to decide which messages to keep and which to summarize
+		console.log(`[ContextManager] Requesting memory decision from LLM`)
+		const memoryDecisionPrompt = this.createMemoryDecisionPrompt(history, strategy)
+		const memoryDecisionStream = api.createMessage(
+			"You are an AI assistant organizing your memory of a technical conversation.",
+			[{ role: "user", content: [{ type: "text", text: memoryDecisionPrompt }] }],
+		)
+
+		// Collect memory decision from stream
+		let memoryDecisionText = ""
+		for await (const chunk of memoryDecisionStream) {
+			if (chunk.type === "text") {
+				memoryDecisionText += chunk.text
+			}
+		}
+
+		// Parse the decision to get indices of messages to keep
+		const { messagesToKeepIndices, summaryInstructions } = this.parseMemoryDecision(memoryDecisionText)
+
+		// STEP 2: Create memory structure based on the LLM's decision
+		const messagesToSummarize = history.filter((_, index) => !messagesToKeepIndices.includes(index))
+		const memoryStructurePrompt = this.createMemoryStructurePrompt(messagesToSummarize, summaryInstructions)
+
+		console.log(`[ContextManager] Requesting memory structure from LLM for ${messagesToSummarize.length} messages`)
+		const memoryStructureStream = api.createMessage(
+			"You are an AI assistant organizing your memory of a technical conversation.",
+			[{ role: "user", content: [{ type: "text", text: memoryStructurePrompt }] }],
+		)
+
+		// Collect memory structure from stream
+		let memoryStructureText = ""
+		for await (const chunk of memoryStructureStream) {
+			if (chunk.type === "text") {
+				memoryStructureText += chunk.text
+			}
+		}
+
+		// Create memory structure message
+		const memoryStructureMessage: Anthropic.MessageParam = {
+			role: "assistant",
+			content: [{ type: "text", text: memoryStructureText }],
+		}
+
+		// STEP 3: Replace old messages with the memory structure
+		const messagesToKeep = history.filter((_, index) => messagesToKeepIndices.includes(index))
+
+		// Create new history with memory structure at the beginning followed by kept messages
+		const newHistory = [memoryStructureMessage, ...messagesToKeep]
+
+		// Calculate the deleted range based on which messages were removed
+		const newDeletedRange: [number, number] = [0, history.length - messagesToKeep.length]
+
+		// Update memory refresh tracking
+		this.lastMemoryRefreshTokenCount = newHistory.reduce((sum, msg) => sum + this.estimateTokenCount(msg), 0)
+		this.memoryRefreshCount++
+
+		// Extract a brief summary (first 5 words)
+		const summaryBrief = memoryStructureText.split(" ").slice(0, 5).join(" ") + "..."
+
+		console.log(
+			`[ContextManager] Memory refresh #${this.memoryRefreshCount} complete. Replaced ${messagesToSummarize.length} messages with a summary. New history has ${newHistory.length} messages. Token count: ${this.lastMemoryRefreshTokenCount}`,
+		)
+
+		return {
+			history: newHistory,
+			deletedRange: newDeletedRange,
+			didSummarize: true,
+			messagesReplaced: messagesToSummarize.length,
+			tokensBefore: analysis.totalTokens,
+			tokensAfter: this.lastMemoryRefreshTokenCount,
+			summaryBrief,
+		}
+	}
+
+	/**
+	 * Legacy method for creating memory structure
+	 * Kept for backward compatibility
 	 */
 	public async createMemoryStructure(
 		api: ApiHandler,
@@ -208,71 +467,6 @@ I remember our key technical decisions and their rationales.
 
 ## NEXT STEPS
 I'll continue helping with the implementation as we discussed.`
-		}
-	}
-
-	/**
-	 * Optimize conversation history using LLM memory management instead of truncation
-	 */
-	public async optimizeConversationHistory(
-		api: ApiHandler,
-		history: Anthropic.MessageParam[],
-		deletedRange: [number, number] | undefined,
-	): Promise<OptimizationResult> {
-		// Analyze conversation to determine if memory refresh is needed
-		const analysis = this.analyzeConversation(history)
-		console.log(
-			`[ContextManager] Starting memory optimization with ${history.length} messages, utilization: ${Math.round(analysis.utilizationPercentage * 100)}%`,
-		)
-
-		// If memory refresh not needed, return unchanged
-		if (!analysis.needsSummarization) {
-			console.log(`[ContextManager] Memory refresh not needed, skipping`)
-			return {
-				history,
-				deletedRange: undefined, // No deletion range since we don't truncate
-				didSummarize: false,
-			}
-		}
-
-		// Determine memory strategy based on current token usage
-		const strategy = this.getMemoryStrategy(analysis.utilizationPercentage)
-		console.log(`[ContextManager] Using ${strategy} memory strategy for ${analysis.totalTokens} tokens`)
-
-		// STEP 1: Create memory refresh notification message
-		const refreshMessage = SlidingWindow.createMemoryRefreshMessage(analysis.totalTokens, this.maxContextLength)
-		console.log(`[ContextManager] Created memory refresh notification message`)
-
-		// STEP 2: Create memory structure
-		console.log(`[ContextManager] Requesting memory structure from LLM`)
-		const memoryStructureText = await this.createMemoryStructure(api, history, strategy)
-
-		// Create memory structure message
-		const memoryStructureMessage: Anthropic.MessageParam = {
-			role: "assistant",
-			content: [{ type: "text", text: memoryStructureText }],
-		}
-
-		// STEP 3: Add both messages to history (NO TRUNCATION)
-		const newHistory = [
-			...history, // Keep all original messages
-			refreshMessage, // Add refresh notification
-			memoryStructureMessage, // Add memory structure
-		]
-
-		// Update memory refresh tracking
-		this.lastMemoryRefreshTokenCount = newHistory.reduce((sum, msg) => sum + this.estimateTokenCount(msg), 0)
-		this.memoryRefreshCount++
-
-		console.log(
-			`[ContextManager] Memory refresh #${this.memoryRefreshCount} complete. New history has ${newHistory.length} messages (added 2 messages). Token count: ${this.lastMemoryRefreshTokenCount}`,
-		)
-
-		return {
-			history: newHistory,
-			deletedRange: undefined, // No deletion range since we don't truncate
-			didSummarize: true,
-			messagesReplaced: 0, // No messages replaced, only added
 		}
 	}
 }
